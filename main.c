@@ -21,8 +21,52 @@ typedef enum Error {
     Error_MustCreateNewNode,
     Error_KeyExists,
 
+    Error_UnableToOpenFile,
+    Error_WhileReadingFile,
+
+    Error_DuringFirstSlash,
+    Error_DuringBackslash,
+    Error_DuringOpenQuote,
+    Error_DuringOpenQuoteBackslash,
+    Error_DuringWhitespace,
+    Error_DuringSingleQuote,
+    Error_DuringSingleQuoteBackslash,
+    Error_DuringLineComment,
+    Error_DuringBlockComment,
+    Error_DuringMaybeClosingBlockComment,
+
     Error_Internal
 } Error;
+
+const char* Error_ToConstStr(Error err) {
+    switch(err) {
+        case Error_Good: return "Error_Good";
+        case Error_VarExists: return "Error_VarExists";
+        case Error_Alloc: return "Error_Alloc";
+        case Error_ParseFailed: return "Error_ParseFailed";
+        case Error_Eof: return "Error_Eof";
+        case Error_OutOfBounds: return "Error_OutOfBounds";
+        case Error_UnexpectedToken: return "Error_UnexpectedToken";
+        case Error_NothingToPop: return "Error_NothingToPop";
+        case Error_FoundNothing: return "Error_FoundNothing";
+        case Error_MustCreateNewNode: return "Error_MustCreateNewNode";
+        case Error_KeyExists: return "Error_KeyExists";
+        case Error_UnableToOpenFile: return "Error_UnableToOpenFile";
+        case Error_WhileReadingFile: return "Error_WhileReadingFile";
+        case Error_DuringFirstSlash: return "Error_DuringFirstSlash";
+        case Error_DuringBackslash: return "Error_DuringBackslash";
+        case Error_DuringOpenQuote: return "Error_DuringOpenQuote";
+        case Error_DuringOpenQuoteBackslash: return "Error_DuringOpenQuoteBackslash";
+        case Error_DuringWhitespace: return "Error_DuringWhitespace";
+        case Error_DuringSingleQuote: return "Error_DuringSingleQuote";
+        case Error_DuringSingleQuoteBackslash: return "Error_DuringSingleQuoteBackslash";
+        case Error_DuringLineComment: return "Error_DuringLineComment";
+        case Error_DuringBlockComment: return "Error_DuringBlockComment";
+        case Error_DuringMaybeClosingBlockComment: return "Error_DuringMaybeClosingBlockComment";
+        case Error_Internal: return "Error_Internal";
+        default: return "Unknown error type.";
+    }
+}
 
 #define NOFAIL(x) if ((x) != Error_Good) { return Error_Internal; }
 
@@ -30,6 +74,61 @@ typedef struct String {
     const byte* data;
     UInt length;
 } String;
+
+// Error_Alloc
+// Error_UnableToOpenFile
+// Error_WhileReadingFile
+Error String_FromFile(String* out, byte** data, const char* filename) {
+    // first try and open the file
+    FILE* file_handle = fopen(filename, "r");
+    if (file_handle == NULL) return Error_UnableToOpenFile;
+
+    // set up the allocated buffer with a starting size of 512 bytes.
+    UInt current_capacity = 512;
+    UInt current_length = 0;
+    byte* buf = malloc(current_capacity);
+    if (buf == NULL) {
+        // didn't allocate, so close the file and return
+        fclose(file_handle);
+        return Error_Alloc;
+    }
+
+    // this will read the entire file into buf
+    // since fread does not start from the beginning each time, we only read in the difference between the capacity and the currently read portion
+    // in buf.
+    UInt current_read_size = current_capacity;
+    while (true) {
+        // read the next few bytes
+        size_t ret_val = fread(buf + (uintptr_t)current_length, sizeof(byte), current_read_size, file_handle);
+        current_length += (UInt)ret_val;
+
+        // we didn't read the specified number of bytes. either there weren't anymore bytes, or there was some error.
+        if (ret_val != current_read_size) {
+            // check for end of file.
+            if (feof(file_handle)) {
+                *data = buf;
+                out->data = buf;
+                out->length = current_length;
+                return Error_Good;
+            } else if (ferror(file_handle)) {
+                // there was an error, so just free the buffer and return.
+                fclose(file_handle);
+                free(buf);
+                return Error_WhileReadingFile;
+            }
+        } else {
+            // we read the entire specified read size, so there are probably more bytes to read.
+            // we increase the reading size by 1.5x, and add that onto the buffer capacity.
+            UInt new_reading_size = current_read_size + (current_read_size >> 1) + 1;
+            buf = realloc(buf, current_capacity + new_reading_size);
+            if (buf == NULL) {
+                fclose(file_handle);
+                return Error_Alloc;
+            }
+            current_capacity += new_reading_size;
+        }
+    }
+}
 
 String StringFromLiteral(const char* literal) {
     String ret = {
@@ -54,7 +153,7 @@ void String_Print(const String* src) {
     }
 }
 
-byte StringAt(String* s, UInt pos) {
+byte String_At(String* s, UInt pos) {
     return s->data[pos];
 }
 
@@ -267,20 +366,20 @@ Error Stack_Pop(Stack* stack, void* out) {
     }
 }
 
-typedef struct StringToPtrMap {
+typedef struct StringToPtrMapBlock {
     String key;
     void* value;
     UInt hash;
 
-    struct StringToPtrMap* hash_is_smaller;
-    struct StringToPtrMap* hash_is_equal;
-    struct StringToPtrMap* hash_is_greater;
-} StringToPtrMap;
+    struct StringToPtrMapBlock* hash_is_smaller;
+    struct StringToPtrMapBlock* hash_is_equal;
+    struct StringToPtrMapBlock* hash_is_greater;
+} StringToPtrMapBlock;
 
-void StringToPtrMap_Init(StringToPtrMap* map, String* key, void* value) {
+void StringToPtrMapBlock_Init(StringToPtrMapBlock* map, String* key, void* value) {
     map->key = *key;
     map->value = value;
-    map->hash = String_hash(&map->key);
+    map->hash = String_Hash(&map->key);
 
     map->hash_is_smaller = NULL;
     map->hash_is_equal = NULL;
@@ -289,14 +388,14 @@ void StringToPtrMap_Init(StringToPtrMap* map, String* key, void* value) {
 
 // Error_KeyExists
 // Error_MustCreateNewNode
-Error StringToPtrMap_ExistsHelper(StringToPtrMap* map, String* key, UInt key_hash, void** value_out, StringToPtrMap*** to_initialize) {
+Error StringToPtrMapBlock_ExistsHelper(StringToPtrMapBlock* map, String* key, UInt key_hash, void** value_out, StringToPtrMapBlock*** to_initialize) {
     if (map->hash == key_hash) {
         if (String_IsEqual(&map->key, key)) {
             if (value_out != NULL) *value_out = map->value;
             return Error_KeyExists;
         } else {
             if (map->hash_is_equal != NULL) {
-                return StringToPtrMap_ExistsHelper(map->hash_is_equal, key, key_hash, value_out, to_initialize);
+                return StringToPtrMapBlock_ExistsHelper(map->hash_is_equal, key, key_hash, value_out, to_initialize);
             } else {
                 // we would have to create a new one.
                 *to_initialize = &map->hash_is_equal;
@@ -306,14 +405,14 @@ Error StringToPtrMap_ExistsHelper(StringToPtrMap* map, String* key, UInt key_has
     } else {
         if (key_hash > map->hash) {
             if (map->hash_is_greater != NULL) {
-                return StringToPtrMap_ExistsHelper(map->hash_is_greater, key, key_hash, value_out, to_initialize);
+                return StringToPtrMapBlock_ExistsHelper(map->hash_is_greater, key, key_hash, value_out, to_initialize);
             } else {
                 *to_initialize = &map->hash_is_greater;
                 return Error_MustCreateNewNode;
             }
         } else {
             if (map->hash_is_smaller != NULL) {
-                return StringToPtrMap_ExistsHelper(map->hash_is_smaller, key, key_hash, value_out, to_initialize);
+                return StringToPtrMapBlock_ExistsHelper(map->hash_is_smaller, key, key_hash, value_out, to_initialize);
             } else {
                 *to_initialize = &map->hash_is_smaller;
                 return Error_MustCreateNewNode;
@@ -324,25 +423,89 @@ Error StringToPtrMap_ExistsHelper(StringToPtrMap* map, String* key, UInt key_has
 
 // Error_KeyExists
 // Error_Alloc
-Error StringToPtrMap_CreateIfNotExist(StringToPtrMap* map, String* key, void* value_ptr) {
-    StringToPtrMap** new_node_to_allocate = NULL;
-    Error err = StringToPtrMap_ExistsHelper(map, key, String_Hash(key), NULL, &new_node_to_allocate);
+Error StringToPtrMapBlock_CreateIfNotExist(StringToPtrMapBlock* map, String* key, void* value_ptr) {
+    StringToPtrMapBlock** new_node_to_allocate = NULL;
+    Error err = StringToPtrMapBlock_ExistsHelper(map, key, String_Hash(key), NULL, &new_node_to_allocate);
     if (err == Error_KeyExists) return Error_KeyExists;
     if (err == Error_MustCreateNewNode) {
-        *new_node_to_allocate = malloc(sizeof(StringToPtrMap));
+        *new_node_to_allocate = malloc(sizeof(StringToPtrMapBlock));
         if (*new_node_to_allocate == NULL) return Error_Alloc;
-        StringToPtrMap_Init(*new_node_to_allocate, key, value_ptr);
+        StringToPtrMapBlock_Init(*new_node_to_allocate, key, value_ptr);
         return Error_Good;
     }
     NOFAIL(err);
+    return Error_Good;
 }
+
+typedef struct StringToPtrMap {
+    StringToPtrMapBlock first_block;
+    bool has_first_block;
+} StringToPtrMap;
+
+void StringToPtrMap_Init(StringToPtrMap* map) {
+    map->has_first_block = false;
+}
+
+// Error_KeyExists
+// Error_Alloc
+Error StringToPtrMap_CreateIfNotExist(StringToPtrMap* map, String* key, void* value_ptr) {
+    if (!map->has_first_block) {
+        StringToPtrMapBlock_Init(&map->first_block, key, value_ptr);
+        return Error_Good;
+    } else {
+        Error err = StringToPtrMapBlock_CreateIfNotExist(&map->first_block, key, value_ptr);
+        if (err == Error_KeyExists) return Error_KeyExists;
+        if (err == Error_Alloc) return Error_Alloc;
+        NOFAIL(err);
+        return Error_Good;
+    }
+}
+
+
 
 typedef enum TokenType {
     Token_Integer,
     Token_Plus,
     Token_Eq,
     Token_Identifier,
-    Token_Eof
+    Token_Division,
+    Token_Eof,
+    
+    // keywords
+    Token_Auto,
+    Token_Break,
+    Token_Case,
+    Token_Char,
+    Token_Const,
+    Token_Continue,
+    Token_Default,
+    Token_Do,
+    Token_Double,
+    Token_Else,
+    Token_Enum,
+    Token_Extern,
+    Token_Float,
+    Token_For,
+    Token_Goto,
+    Token_If,
+    Token_Inline,
+    Token_Int,
+    Token_Long,
+    Token_Register,
+    Token_Restrict,
+    Token_Return,
+    Token_Short,
+    Token_Signed,
+    Token_Sizeof,
+    Token_Static,
+    Token_Struct,
+    Token_Switch,
+    Token_Typedef,
+    Token_Union,
+    Token_Unsigned,
+    Token_Void,
+    Token_Volatile,
+    Token_While,
 } TokenType;
 
 typedef struct Token {
@@ -358,11 +521,47 @@ Token Token_Create(TokenType token_type, const byte* data, UInt length) {
     return ret;
 }
 
-const char* token_map[] = {
-    "Int",
-    "+",
-    "=",
-    "Identifier"
+static const char* token_map[] = {
+    "Token_Integer",
+    "Token_Plus",
+    "Token_Eq",
+    "Token_Identifier",
+    "Token_Division",
+    "Token_Eof",
+    "Token_Auto",
+    "Token_Break",
+    "Token_Case",
+    "Token_Char",
+    "Token_Const",
+    "Token_Continue",
+    "Token_Default",
+    "Token_Do",
+    "Token_Double",
+    "Token_Else",
+    "Token_Enum",
+    "Token_Extern",
+    "Token_Float",
+    "Token_For",
+    "Token_Goto",
+    "Token_If",
+    "Token_Inline",
+    "Token_Int",
+    "Token_Long",
+    "Token_Register",
+    "Token_Restrict",
+    "Token_Return",
+    "Token_Short",
+    "Token_Signed",
+    "Token_Sizeof",
+    "Token_Static",
+    "Token_Struct",
+    "Token_Switch",
+    "Token_Typedef",
+    "Token_Union",
+    "Token_Unsigned",
+    "Token_Void",
+    "Token_Volatile",
+    "Token_While"
 };
 
 void Token_Print(const Token* token) {
@@ -377,7 +576,8 @@ typedef enum NodeType {
     Node_Token,
     Node_Add,
     Node_VariableDecl,
-    Node_VariableDeclList
+    Node_VariableDeclList,
+    Node_Program
 } NodeType;
 
 typedef struct Node {
@@ -402,11 +602,18 @@ typedef struct Node {
         } add_node;
 
         struct VariableDecl {
+            // identifier node
             struct Node* variable_name;
+
+            // integer node
             struct Node* variable_value;
 
             struct Node* maybe_next_variable_decl;
         } variable_decl_node;
+
+        struct Program {
+            struct Node* variable_decl;
+        } program_node;
     };
 } Node;
 
@@ -470,155 +677,25 @@ void Node_Print(Node* node) {
             printf("\n");
             Node_Print(node->variable_decl_node.maybe_next_variable_decl);
             break;
-
+        case Node_Program:
+            Node_Print(node->program_node.variable_decl);
+            break;
         default:
             printf("Undefined node type.");
             break;
     }
 }
 
-// #define NOFAIL(err) if (err != Error_Good) { return Error_Internal; }
-// #define A(x) x + 1;
-// NOFAIL(A(x))
-
-typedef enum DefineExpressionBlockType {
-    DefineExprBlock_String,
-    DefineExprBlock_Argument
-} DefineExpressionBlockType;
-
-typedef struct DefineExpressionBlock {
-    DefineExpressionBlockType block_type;
-
-    union {
-        String string_chars;
-        UInt arg_number;
-    };
-} DefineExpressionBlock;
-
-typedef struct DefineExpression {
-    DefineExpressionBlock first_block;
-} DefineExpression;
-
-typedef struct ProgramBlock {
-    String data;
-    struct ProgramBlock* next_block;
-} ProgramBlock;
-
-void ProgramBlock_Init(ProgramBlock* block, String* src, UInt start_pos) {
-    block->data.data = src->data + (uintptr_t)start_pos;
-    block->data.length = 0;
-    block->next_block = NULL;
+bool IsWhitespace(byte b) {
+    return b <= 32 || b >= 127;
 }
 
-void ProgramBlock_IncrementLength(ProgramBlock* block) {
-    block->data.length++;
+bool IsIdent(byte b) {
+    return ('a' <= b && 'z' >= b) || ('A' <= b && 'Z' >= b) || (b == '_');
 }
 
-typedef struct Preprocessor {
-    String src;
-    UInt pos;
-    ProgramBlock processed_program;
-    ProgramBlock* last_block;
-} Preprocessor;
-
-void Preprocessor_Init(Preprocessor* p, String* src) {
-    p->src = *src;
-    p->pos = 0;
-    ProgramBlock_Init(&p->processed_program, src, p->pos);
-    p->last_block = &p->processed_program;
-}
-
-byte Preprocessor_Get(Preprocessor* p) {
-    return StringAt(&p->src, p->pos);
-}
-
-bool Preprocessor_IsEof(Preprocessor* p) {
-    return p->pos >= p->src.length;
-}
-
-Error Preprocessor_ParseLine(Preprocessor* p) {
-    // before hitting a preprocessor stmt
-
-    bool can_parse_preproc = true;
-    byte c;
-    while (true) {
-        if (Preprocessor_IsEof(p)) return Error_Good;
-
-        c = Preprocessor_Get(p);
-        p->pos++;
-        if (c == '#' && can_parse_preproc) {
-            break;
-        } else if (!IsWhitespace(c)) {
-            can_parse_preproc = false;
-        } else if (c == '\n') {
-            can_parse_preproc = true;
-        }
-        ProgramBlock_IncrementLength(p->last_block);
-    }
-
-    // now parsing preproc stmt
-
-    char* string_to_parse = NULL;
-    UInt string_to_parse_pos = 1;
-    int state = 0;
-
-    while (true) {
-        if (Preprocessor_IsEof(p)) return Error_ParseFailed;
-
-        c = Preprocessor_Get(p);
-        p->pos++;
-
-        if (state == 0) {
-            if (c == 'd') {
-                string_to_parse = "define";
-                state = 1;
-            } else if (c == 'i') {
-                string_to_parse = "include";
-                state = 2;
-            } else if (!IsWhitespace(c)) {
-                return Error_ParseFailed;
-            }
-        } else if (state == 1 || state == 2) {
-            if (string_to_parse[string_to_parse_pos] == '\0') {
-                // done with parsing the define or include
-                break;
-            } else if (string_to_parse[string_to_parse_pos] != c) {
-                return Error_ParseFailed;
-            }
-            string_to_parse_pos++;
-        }
-    }
-
-    // done parsing the preprocessor instruction, now parse args
-
-    if (state == 1) {
-        while (true) {
-            if (Preprocessor_IsEof(p)) return Error_ParseFailed;
-
-            c = Preprocessor_Get(p);
-            p->pos++;
-        }
-    } else if (state == 2) {
-        state = 0;
-        while (true) {
-            if (Preprocessor_IsEof(p)) return Error_ParseFailed;
-
-            c = Preprocessor_Get(p);
-            p->pos++;
-
-            if (state == 0) {
-                if (IsWhitespace(c)) {
-                    continue;
-                } else if (c == '<') {
-                    state = 1;
-                } else { return Error_ParseFailed; }
-            }
-        }
-    } else {
-        return Error_Internal;
-    }
-
-    return Error_Good;
+bool IsInteger(byte b) {
+    return ('0' <= b && '9' >= b);
 }
 
 typedef struct ParseState {
@@ -632,6 +709,8 @@ typedef struct ParseState {
     Stack num_to_pop;
     UInt* cur_num_to_pop;
     Token current_token;
+
+    StringToPtrMap variables;
 
     String src;
     UInt pos;
@@ -721,20 +800,16 @@ Error ParseState_CommitPopCounter(ParseState* state) {
     return Error_Good;
 }
 
+bool ParseState_DoesByteExistAt(ParseState* p, UInt pos) {
+    return p->src.length > pos;
+}
+
+byte ParseState_AtExtended(ParseState* p, UInt pos) {
+    return String_At(&p->src, pos);
+}
+
 byte ParseState_At(ParseState* p) {
-    return StringAt(&p->src, p->pos);
-}
-
-bool IsWhitespace(byte b) {
-    return b <= 32 || b >= 127;
-}
-
-bool IsIdent(byte b) {
-    return ('a' <= b && 'z' >= b) || ('A' <= b && 'Z' >= b) || (b == '_');
-}
-
-bool IsInteger(byte b) {
-    return ('0' <= b && '9' >= b);
+    return ParseState_AtExtended(p, p->pos);
 }
 
 // Error_Eof
@@ -771,38 +846,131 @@ Error ParseState_SkipWhitespace(ParseState* p, bool* was_newline) {
     }
 }
 
-// DOES NOT SKIP WHITESPACE!
-// Error_ParseFailed
-// Error_Eof
-Error ParseState_ParseStringLiteral(ParseState* p, const byte* str) {
+bool ParseState_IsNextByte(ParseState* p, byte b) {
+    if (!ParseState_DoesByteExistAt(p, p->pos + 1)) {
+        // if we hit end of string, then the byte doesn't match
+        return false;
+    } else {
+        return ParseState_AtExtended(p, p->pos + 1) == b;
+    }
+}
+
+// this function is just looking for a newline. it doesn't care about the start of the line comment.
+// Error_Eof: only if there was no newlines before the end of the file!
+Error ParseState_ParseLineComment(ParseState* p) {
     Error err;
-    UInt prev_pos = p->pos;
-    bool prev_eof = p->eof_state;
 
     while (true) {
-        if (*str == 0) return Error_Good;
-
         byte b = ParseState_At(p);
+        err = ParseState_Advance(p);
+        if (b == (byte)'\n') {
+            return Error_Good;
+        }
+        if (err == Error_Eof) return Error_Eof;
+    }
+}
 
-        if (b == *str) {
-            // parse preprocessor directives.
-            err = ParseState_Advance(p);
-            if (err == Error_Eof) {
-                if (*(str+1) != 0) {
-                    p->pos = prev_pos;
-                    p->eof_state = prev_eof;
-                    return Error_Eof;
-                }
-                return Error_Good;
-            }
-            NOFAIL(err);
-            str++;
+// this function is just looking for a */
+// it doesn't care about the start of the line comment.
+// Error_ParseFailed: if there wasn't a closing */
+Error ParseState_ParseBlockComment(ParseState* p) {
+    Error err;
+
+    bool was_star = false;
+    while (true) {
+        byte b = ParseState_At(p);
+        err = ParseState_Advance(p);
+        
+        if (was_star && b == (byte)'/') {
+            return Error_Good;
+        } else if (b == (byte)'*') {
+            was_star = true;
         } else {
-            p->pos = prev_pos;
-            p->eof_state = prev_eof;
-            return Error_ParseFailed;
+            was_star = false;
+        }
+
+        if (err == Error_Eof) return Error_ParseFailed;
+    }
+}
+
+struct KeywordMap {
+    UInt len;
+    const char* kw;
+    TokenType t;
+};
+
+static const struct KeywordMap keyword_map[] = {
+    {2, "do", Token_Do},
+    {2, "if", Token_If},
+    {3, "for", Token_For},
+    {3, "int", Token_Int},
+    {4, "auto", Token_Auto},
+    {4, "case", Token_Case},
+    {4, "char", Token_Char},
+    {4, "else", Token_Else},
+    {4, "enum", Token_Enum},
+    {4, "goto", Token_Goto},
+    {4, "long", Token_Long},
+    {4, "void", Token_Void},
+    {5, "break", Token_Break},
+    {5, "const", Token_Const},
+    {5, "float", Token_Float},
+    {5, "short", Token_Short},
+    {5, "union", Token_Union},
+    {5, "while", Token_While},
+    {6, "double", Token_Double},
+    {6, "extern", Token_Extern},
+    {6, "inline", Token_Inline},
+    {6, "return", Token_Return},
+    {6, "signed", Token_Signed},
+    {6, "sizeof", Token_Sizeof},
+    {6, "static", Token_Static},
+    {6, "struct", Token_Struct},
+    {6, "switch", Token_Switch},
+    {7, "typedef", Token_Typedef},
+    {7, "default", Token_Default},
+    {8, "register", Token_Register},
+    {8, "restrict", Token_Restrict},
+    {8, "unsigned", Token_Unsigned},
+    {8, "volatile", Token_Volatile},
+    {8, "continue", Token_Continue}
+};
+
+void ParseState_CheckForKeywords(ParseState* p, const byte* first_char_ptr, UInt token_length, TokenType* token_type_out) {
+    for (UInt i = 0; i < sizeof(keyword_map) / sizeof(*keyword_map); i++) {
+        if (keyword_map[i].len == token_length) {
+            if (memcmp(keyword_map[i].kw, first_char_ptr, token_length) == 0) {
+                *token_type_out = keyword_map[i].t;
+            }
         }
     }
+}
+
+// assumes the current character is already an identifier character.
+Error ParseState_ParseIdentifierOrKeyword(ParseState* p, const byte** first_char_ptr_out, UInt* token_length_out, TokenType* token_type_out) {
+    Error err;
+    byte b;
+
+    *first_char_ptr_out = ParseState_PosPtr(p);
+    *token_length_out = 1;
+    *token_type_out = Token_Identifier;
+    
+    while (true) {
+        err = ParseState_Advance(p);
+        if (err == Error_Eof) break;
+        NOFAIL(err);
+
+        b = ParseState_At(p);
+
+        if (IsIdent(b) || IsInteger(b)) {
+            (*token_length_out)++;
+        } else {
+            break;
+        }
+    }
+
+    ParseState_CheckForKeywords(p, *first_char_ptr_out, *token_length_out, token_type_out);
+    return Error_Good;
 }
 
 // Error_Eof
@@ -813,23 +981,13 @@ Error ParseState_NextTokenHelper(ParseState* p, const byte** first_char_ptr_out,
     if (p->eof_state) return Error_Eof;
 
     bool was_newline = false;
+    
     err = ParseState_SkipWhitespace(p, &was_newline);
     if (err == Error_Eof) return Error_Eof;
     NOFAIL(err);
 
     byte b = ParseState_At(p);
-    if (b == '#' && was_newline == true) {
-        // parse preprocessor directives.
-        err = ParseState_Advance(p);
-        if (err == Error_Eof) return Error_ParseFailed;
-        NOFAIL(err);
-
-        err = ParseState_ParseStringLiteral(p, "include");
-        NOFAIL(err);
-        err = ParseState_ParseStringLiteral(p, "define");
-        NOFAIL(err);
-
-    } else if (IsInteger(b)) {
+    if (IsInteger(b)) {
         *first_char_ptr_out = ParseState_PosPtr(p);
         *token_length_out = 1;
         *token_type_out = Token_Integer;
@@ -848,23 +1006,9 @@ Error ParseState_NextTokenHelper(ParseState* p, const byte** first_char_ptr_out,
             }
         }
     } else if (IsIdent(b)) {
-        *first_char_ptr_out = ParseState_PosPtr(p);
-        *token_length_out = 1;
-        *token_type_out = Token_Identifier;
-
-        while (true) {
-            err = ParseState_Advance(p);
-            if (err == Error_Eof) return Error_Good;
-            NOFAIL(err);
-
-            b = ParseState_At(p);
-
-            if (IsIdent(b) || IsInteger(b)) {
-                (*token_length_out)++;
-            } else {
-                return Error_Good;
-            }
-        }
+        err = ParseState_ParseIdentifierOrKeyword(p, first_char_ptr_out, token_length_out, token_type_out);
+        NOFAIL(err);
+        return Error_Good;
     } else if (b == '+') {
         *first_char_ptr_out = ParseState_PosPtr(p);
         *token_length_out = 1;
@@ -879,9 +1023,30 @@ Error ParseState_NextTokenHelper(ParseState* p, const byte** first_char_ptr_out,
 
         ParseState_Advance(p);
         return Error_Good;
+    } else if (b == '/') {
+        if (ParseState_IsNextByte(p, '/')) {
+            // this is a line comment
+            err = ParseState_ParseLineComment(p);
+            if (err == Error_Eof) return Error_Eof;
+            NOFAIL(err);
+        } else if (ParseState_IsNextByte(p, '*')) {
+            // this is a block comment
+            err = ParseState_ParseBlockComment(p);
+            if (err == Error_ParseFailed) return Error_ParseFailed;
+            NOFAIL(err);
+        } else {
+            // just a regular division
+            *first_char_ptr_out = ParseState_PosPtr(p);
+            *token_length_out = 1;
+            *token_type_out = Token_Division;
+            
+            ParseState_Advance(p);
+            return Error_Good;
+        }
     } else {
         return Error_ParseFailed;
     }
+    return Error_Good;
 }
 
 // Error_ParseFailed
@@ -1012,6 +1177,7 @@ Error ParseState_ParseOneOrMoreVariableDecl(ParseState* p, Node** out) {
         NOFAIL(err);
 
         **current_output_loc = Node_CreateVariableDecl(variable_name, variable_value, NULL);
+
         parsed_at_least_one = true;
 
         // since nothing failed, commit the changes of the current node.
@@ -1035,26 +1201,123 @@ Error ParseState_ParseOneOrMoreVariableDecl(ParseState* p, Node** out) {
     }
 }
 
+// Error_Alloc
+// Error_ParseFailed
+Error ParseState_ParseProgram(ParseState* p, Node** out) {
+    Error err;
+    err = ParseState_AllocNode(p, out);
+    if (err == Error_Alloc) return Error_Alloc;
+    NOFAIL(err);
+
+    Node* node_ptr = *out;
+    node_ptr->node_type = Node_Program;
+
+    err = ParseState_ParseOneOrMoreVariableDecl(p, &node_ptr->program_node.variable_decl);
+    if (err == Error_Alloc) return Error_Alloc;
+    if (err == Error_ParseFailed) return Error_ParseFailed;
+    NOFAIL(err);
+
+    return Error_Good;
+}
+
+typedef enum StateInstructionType {
+    SInstr_Assign,
+    SInstr_AddThenAssign
+} StateInstructionType;
+
+typedef struct StateInstruction {
+    StateInstructionType type;
+
+    union {
+        struct Assign {
+            String dest_variable;
+            String src;
+        } assign;
+
+        struct Assign {
+            String dest_variable;
+            String src1;
+            String src2;
+        } add_then_assign;
+    };
+} StateInstruction;
+
+typedef enum StateBooleanExprType {
+    SBoolExpr_Eq
+} StateBooleanExprType;
+
+typedef struct StateBooleanExpr {
+    StateBooleanExprType type;
+
+    union {
+        struct Eq {
+            String op1;
+            String op2;
+        } eq;
+    };
+} StateBooleanExpr;
+
+typedef struct State State;
+
+typedef struct StateSwitcher {
+    StateBooleanExpr expr;
+    State* true_state;
+    State* false_state;
+} StateSwitcher;
+
+typedef struct State {
+    // stack of StateInstruction
+    Stack state_instructions;
+} State;
+
+typedef struct StateMachine {
+    StringToPtrMap variables;
+    // stack of State
+    Stack states;
+} StateMachine;
+
+Error StateMachine_Init(StateMachine* m) {
+    Error err;
+    StringToPtrMap_Init(&m->variables);
+    err = Stack_Init(&m->states, sizeof(State), 16);
+    if (err == Error_Alloc) return Error_Alloc;
+    NOFAIL(err);
+
+    return Error_Good;
+}
+
 #pragma clang diagnostic ignored "-Wunused-variable"
 
+void error(const char* src, const char* msg, UInt line) {
+    printf("%s(%u): %s\n", src, line, msg);
+    exit(1);
+}
+
+#define IF_ERR(_err, msg) if (_err == err) { error("main", msg, __LINE__); }
+
+#undef NOFAIL
+#define NOFAIL if (err != Error_Good) { error("main", "internal error.", __LINE__); }
+
 int main(void) {
-    String test_program = StringFromLiteral("a = 1 b = 2");
+    String test_program;
+    byte* program_data;
+    Error err = String_FromFile(&test_program, &program_data, "test.txt");
 
-    ParseState parse_state;
-    Error err = ParseState_Init(&parse_state, test_program);
-    if (err != Error_Good) {
-        printf("init error");
-        return 1;
-    }
+    IF_ERR(Error_Alloc, "allocation failure.");
+    IF_ERR(Error_UnableToOpenFile, "unable to open file.");
+    IF_ERR(Error_WhileReadingFile, "while reading file.");
+    NOFAIL;
 
-    Token token;
-    UInt iterations = 0;
-    Node* variable_decl = NULL;
-    err = ParseState_ParseOneOrMoreVariableDecl(&parse_state, &variable_decl);
-    printf("err: %d\n", err);
-    if (err != Error_Good) return 1;
+    ParseState state;
+    err = ParseState_Init(&state, test_program);
+    NOFAIL;
 
-    Node_Print(variable_decl);
-    
+    Node* node_ptr = NULL;
+    err = ParseState_ParseProgram(&state, &node_ptr);
+    NOFAIL;
+
+    Node_Print(node_ptr);
+    printf("\nC program:\n");
+
     return 0;
 }
