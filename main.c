@@ -731,22 +731,15 @@ bool IsInteger(byte b) {
     return ('0' <= b && '9' >= b);
 }
 
-typedef struct ParseStateSavePointGlobals {
-    // Stack of Node*
-    Stack node_stack;
-    Node* top_node;
-
-    // Stack of ParseStateSavePoint*
-    Stack parse_state_save_points;
-    struct ParseStateSavePoint* top_save_point;
-} ParseStateSavePointGlobals;
-
 typedef struct ParseStateSavePoint {
     Stack* node_stack;
+    UInt nodes_created;
 
     Token current_token;
     StringStream str;
     bool has_token;
+
+    struct ParseStateSavePoint* prev;
 } ParseStateSavePoint;
 
 // Error_Alloc
