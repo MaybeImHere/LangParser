@@ -172,6 +172,43 @@ bool String_IsEqual(const String* s1, const String* s2) {
     return memcmp(s1->data, s2->data, s1->length) == 0;
 }
 
+typedef struct StringStream {
+    String src;
+    UInt pos;
+    bool eof;
+} StringStream;
+
+void StringStream_Init(StringStream* s, String* src) {
+    s->src = *src;
+    s->pos = 0;
+    // if we are already at the end, make sure to set the eof bit.
+    s->eof = src->length == 0;
+}
+
+// returns the byte at the current position, or 0 if at the end of file.
+byte StringStream_Peek(StringStream* s) {
+    if (s->eof) {
+        return 0;
+    } else {
+        return s->src.data[s->pos];
+    }
+}
+
+// Error_Eof: if the next peek call will result in Error_Eof
+Error StringStream_Advance(StringStream* s) {
+    if (s->eof) return Error_Eof;
+    s->pos++;
+    if (s->pos == s->src.length) {
+        s->eof = true;
+        return Error_Eof;
+    }
+    return Error_Good;
+}
+
+bool StringStream_IsEof(StringStream* s) {
+    return s->eof;
+}
+
 typedef struct StackBlock {
     byte* data;
     UInt length;
@@ -576,9 +613,20 @@ typedef enum NodeType {
     Node_Token,
     Node_Add,
     Node_VariableDecl,
-    Node_VariableDeclList,
+    Node_Value,
+    Node_BooleanExpr,
+    Node_IfBlock,
     Node_Program
 } NodeType;
+
+typedef enum NodeValueType {
+    NodeValue_Identifier,
+    NodeValue_Integer
+} NodeValueType;
+
+typedef enum NodeBooleanExprType {
+    NodeBoolExpr_Equal
+} NodeBooleanExprType;
 
 typedef struct Node {
     NodeType node_type;
@@ -611,43 +659,28 @@ typedef struct Node {
             struct Node* maybe_next_variable_decl;
         } variable_decl_node;
 
+        struct Value {
+            NodeValueType type;
+            union {
+                // something like a variable
+                struct Node* identifier_atom;
+                // something like a number.
+                struct Node* integer_atom;
+            };
+        } value_node;
+
+        struct BooleanExpr {
+            NodeBooleanExprType type;
+            // both are of type Value
+            struct Node* left_node;
+            struct Node* right_node;
+        } boolean_expr_node;
+
         struct Program {
             struct Node* variable_decl;
         } program_node;
     };
 } Node;
-
-Node Node_CreateInteger(String src) {
-    Node ret = {
-        .node_type = Node_Integer,
-        .integer_node = {
-            .src = src
-        }
-    };
-    return ret;
-}
-
-Node Node_CreateIdentifier(String src) {
-    Node ret = {
-        .node_type = Node_Identifier,
-        .identifier_node = {
-            .src = src
-        }
-    };
-    return ret;
-}
-
-Node Node_CreateVariableDecl(Node* variable_name, Node* variable_value, Node* next_variable_decl) {
-    Node ret = {
-        .node_type = Node_VariableDecl,
-        .variable_decl_node = {
-            .variable_name = variable_name,
-            .variable_value = variable_value,
-            .maybe_next_variable_decl = next_variable_decl
-        }
-    };
-    return ret;
-}
 
 void Node_Print(Node* node) {
     if (node == NULL) return;
@@ -698,6 +731,69 @@ bool IsInteger(byte b) {
     return ('0' <= b && '9' >= b);
 }
 
+typedef struct ParseStateSavePointGlobals {
+    // Stack of Node*
+    Stack node_stack;
+    Node* top_node;
+
+    // Stack of ParseStateSavePoint*
+    Stack parse_state_save_points;
+    struct ParseStateSavePoint* top_save_point;
+} ParseStateSavePointGlobals;
+
+typedef struct ParseStateSavePoint {
+    Stack* node_stack;
+
+    Token current_token;
+    StringStream str;
+    bool has_token;
+} ParseStateSavePoint;
+
+// Error_Alloc
+Error ParseStateSavePoint_Init(ParseStateSavePoint* p, Stack* node_stack) {
+    return Error_Good;
+}
+
+// Error_Eof
+Error ParseStateSavePoint_PeekByte(ParseStateSavePoint* p, byte* out) {
+    byte b = StringStream_Peek(&p->str);
+    if (b == '\0') {
+        if (StringStream_IsEof(&p->str)) {
+            return Error_Eof;
+        }
+    }
+    *out = b;
+    return Error_Good;
+}
+
+void ParseStateSavePoint_AdvanceByte(ParseStateSavePoint* p) {
+    // we don't care about end of file.
+    // that should be handled by the PeekByte caller anyway.
+    StringStream_Advance(&p->str);
+}
+
+Error ParseStateSavePoint_SkipWhitespace(ParseStateSavePoint* p) {
+    Error err;
+    byte b;
+    while (true) {
+        err = ParseStateSavePoint_PeekByte(p, &b);
+        if (err == Error_Eof) return Error_Good;
+        NOFAIL(err);
+
+        // first check for whitespace
+        if (IsWhitespace(b)) {
+            ParseStateSavePoint_AdvanceByte(p);
+            continue;
+        } else {
+            return Error_Good;
+        }
+    }
+}
+
+Error ParseStateSavePoint_AllocNode(ParseStateSavePoint* p, NodeType node_type, Node** ptr_to_node_out) {
+
+}
+
 typedef struct ParseState {
     // a stack of Node
     Stack object_stack;
@@ -708,18 +804,15 @@ typedef struct ParseState {
     // they failed. 
     Stack num_to_pop;
     UInt* cur_num_to_pop;
+
     Token current_token;
-
-    StringToPtrMap variables;
-
-    String src;
-    UInt pos;
-    bool eof_state;
+    StringStream str;
     bool has_token;
+
 } ParseState;
 
 // Error_Alloc
-Error ParseState_Init(ParseState* state, String src) {
+Error ParseState_Init(ParseState* state, String* src) {
     Error ret = Stack_Init(&state->object_stack, sizeof(Node), 256);
     if (ret == Error_Alloc) goto err1;
     NOFAIL(ret);
@@ -733,9 +826,7 @@ Error ParseState_Init(ParseState* state, String src) {
     if (ret == Error_Alloc) goto err3;
     NOFAIL(ret);
 
-    state->src = src;
-    state->pos = 0;
-    state->eof_state = false;
+    StringStream_Init(&state->str, src);
     state->has_token = false;
 
     return Error_Good;
@@ -748,12 +839,54 @@ Error ParseState_Init(ParseState* state, String src) {
     return Error_Alloc;
 }
 
+// Error_Alloc
 Error ParseState_AllocNode(ParseState* state, Node** node_ptr) {
     Error err = Stack_Push(&state->object_stack, NULL, (void**)node_ptr);
     if (err == Error_Alloc) return Error_Alloc;
     NOFAIL(err);
 
     (*state->cur_num_to_pop)++;
+
+    return Error_Good;
+}
+
+// Error_Alloc
+Error ParseState_CreateInteger(ParseState* p, Node** out, String* integer_data) {
+    Error err = ParseState_AllocNode(p, out);
+    if (err == Error_Alloc) return Error_Alloc;
+    NOFAIL(err);
+
+    Node* new_node = *out;
+    new_node->node_type = Node_Integer;
+    new_node->integer_node.src = *integer_data;
+
+    return Error_Good;
+}
+
+// Error_Alloc
+Error ParseState_CreateIdentifier(ParseState* p, Node** out, String* identifier_data) {
+    Error err = ParseState_AllocNode(p, out);
+    if (err == Error_Alloc) return Error_Alloc;
+    NOFAIL(err);
+
+    Node* new_node = *out;
+    new_node->node_type = Node_Identifier;
+    new_node->identifier_node.src = *identifier_data;
+
+    return Error_Good;
+}
+
+// Error_Alloc
+Error ParseState_CreateVariableDecl(ParseState* p, Node** out, Node* variable_name, Node* variable_value) {
+    Error err = ParseState_AllocNode(p, out);
+    if (err == Error_Alloc) return Error_Alloc;
+    NOFAIL(err);
+
+    Node* new_node = *out;
+    new_node->node_type = Node_VariableDecl;
+    new_node->variable_decl_node.variable_name = variable_name;
+    new_node->variable_decl_node.variable_value = variable_value;
+    new_node->variable_decl_node.maybe_next_variable_decl = NULL;
 
     return Error_Good;
 }
@@ -1082,11 +1215,30 @@ void ParseState_ConsumeToken(ParseState* p) {
     p->has_token = false;
 }
 
+// Error_ParseFailed
+Error ParseState_SkipToken(ParseState* p, TokenType token_to_skip) {
+    Token token;
+    Error err;
+    
+    err = ParseState_PeekToken(p, &token);
+    if (err == Error_ParseFailed) return Error_ParseFailed;
+    NOFAIL(err);
+
+    if (token.token_type != token_to_skip) {
+        return Error_ParseFailed;
+    } else {
+        ParseState_ConsumeToken(p);
+    }
+
+    return Error_Good;
+}
+
 // Error_Alloc
 // Error_ParseFailed
 Error ParseState_ParseInteger(ParseState* p, Node** out) {
     Error err;
     Token token;
+
     err = ParseState_PeekToken(p, &token);
     if (err == Error_ParseFailed) return Error_ParseFailed;
     NOFAIL(err);
@@ -1094,13 +1246,11 @@ Error ParseState_ParseInteger(ParseState* p, Node** out) {
     if (token.token_type == Token_Integer) {
         ParseState_ConsumeToken(p);
 
-        // allocate the node
-        err = ParseState_AllocNode(p, out);
+        // allocate and create the node
+        err = ParseState_CreateInteger(p, out, &token.token_data);
         if (err == Error_Alloc) return Error_Alloc;
         NOFAIL(err);
-        
-        // now set the memory
-        **out = Node_CreateIdentifier(token.token_data);
+
         return Error_Good;
     } else {
         return Error_ParseFailed;
@@ -1112,6 +1262,7 @@ Error ParseState_ParseInteger(ParseState* p, Node** out) {
 Error ParseState_ParseIdentifier(ParseState* p, Node** out) {
     Error err;
     Token token;
+
     err = ParseState_PeekToken(p, &token);
     if (err == Error_ParseFailed) return Error_ParseFailed;
     NOFAIL(err);
@@ -1120,12 +1271,10 @@ Error ParseState_ParseIdentifier(ParseState* p, Node** out) {
         ParseState_ConsumeToken(p);
 
         // allocate the node
-        err = ParseState_AllocNode(p, out);
-        if (err == Error_Alloc) return Error_Alloc; 
+        err = ParseState_CreateIdentifier(p, out, &token.token_data);
+        if (err == Error_Alloc) return Error_Alloc;
         NOFAIL(err);
-        
-        // now set the memory
-        **out = Node_CreateIdentifier(token.token_data);
+
         return Error_Good;
     } else {
         return Error_ParseFailed;
@@ -1136,9 +1285,8 @@ Error ParseState_ParseIdentifier(ParseState* p, Node** out) {
 // Error_ParseFailed
 Error ParseState_ParseOneOrMoreVariableDecl(ParseState* p, Node** out) {
     Error err;
-    Token token;
 
-    Node** current_output_loc = out;
+    Node* current_output_loc = NULL;
     Node* variable_name = NULL;
     Node* variable_value = NULL;
     bool parsed_at_least_one = false;
@@ -1155,15 +1303,9 @@ Error ParseState_ParseOneOrMoreVariableDecl(ParseState* p, Node** out) {
         NOFAIL(err);
 
         // now parse the equals sign
-        err = ParseState_PeekToken(p, &token);
+        err = ParseState_SkipToken(p, Token_Eq);
         if (err == Error_ParseFailed) goto failed_parse;
         NOFAIL(err);
-
-        if (token.token_type != Token_Eq) {
-            return Error_ParseFailed;
-        } else {
-            ParseState_ConsumeToken(p);
-        }
 
         // now parse the variable value
         err = ParseState_ParseInteger(p, &variable_value);
@@ -1171,22 +1313,34 @@ Error ParseState_ParseOneOrMoreVariableDecl(ParseState* p, Node** out) {
         if (err == Error_ParseFailed) goto failed_parse;
         NOFAIL(err);
 
-        // now allocate a new node and set the data
-        err = ParseState_AllocNode(p, current_output_loc);
-        if (err == Error_Alloc) return Error_Alloc;
-        NOFAIL(err);
-
-        **current_output_loc = Node_CreateVariableDecl(variable_name, variable_value, NULL);
-
-        parsed_at_least_one = true;
+        // done parsing, now create the node.
+        // we only want to output the first variable declaration node in the tree.
+        // when parsing the rest, we just put the address to the node in our local variable current_output_loc.
+        if (parsed_at_least_one) {
+            Node* new_output_loc = NULL;
+            // first read into our temporary variable.
+            err = ParseState_CreateVariableDecl(p, &new_output_loc, variable_name, variable_value);
+            if (err == Error_Alloc) return Error_Alloc;
+            NOFAIL(err);
+            // now just place that new node as a child of current_output_loc.
+            current_output_loc->variable_decl_node.maybe_next_variable_decl = new_output_loc;
+            // finally, replace current_output_loc with the new variable.
+            current_output_loc = new_output_loc;
+        } else {
+            err = ParseState_CreateVariableDecl(p, out, variable_name, variable_value);
+            if (err == Error_Alloc) return Error_Alloc;
+            NOFAIL(err);
+            
+            // make sure to save the current node so that we can append to it later.
+            current_output_loc = *out;
+            parsed_at_least_one = true;
+        }
 
         // since nothing failed, commit the changes of the current node.
         ParseState_CommitPopCounter(p);
         
         // now try parsing the next variable declaration
         // set the output location to the pointer to the next variable decl in the struct we just created.
-        Node* new_node = *current_output_loc;
-        current_output_loc = &new_node->variable_decl_node.maybe_next_variable_decl;
 
         // make sure to skip over the error handling code below.
         continue;
@@ -1234,7 +1388,7 @@ typedef struct StateInstruction {
             String src;
         } assign;
 
-        struct Assign {
+        struct AddThenAssign {
             String dest_variable;
             String src1;
             String src2;
