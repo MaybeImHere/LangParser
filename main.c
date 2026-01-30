@@ -209,6 +209,10 @@ bool StringStream_IsEof(StringStream* s) {
     return s->eof;
 }
 
+String StringStream_GetStringWithLength(StringStream* s, UInt length) {
+    return String_Create(&s->src.data[s->pos], length);
+}
+
 typedef struct StackBlock {
     byte* data;
     UInt length;
@@ -619,11 +623,6 @@ typedef enum NodeType {
     Node_Program
 } NodeType;
 
-typedef enum NodeValueType {
-    NodeValue_Identifier,
-    NodeValue_Integer
-} NodeValueType;
-
 typedef enum NodeBooleanExprType {
     NodeBoolExpr_Equal
 } NodeBooleanExprType;
@@ -660,13 +659,8 @@ typedef struct Node {
         } variable_decl_node;
 
         struct Value {
-            NodeValueType type;
-            union {
-                // something like a variable
-                struct Node* identifier_atom;
-                // something like a number.
-                struct Node* integer_atom;
-            };
+            // something like a variable
+            struct Node* identifier_or_integer;
         } value_node;
 
         struct BooleanExpr {
@@ -710,9 +704,15 @@ void Node_Print(Node* node) {
             printf("\n");
             Node_Print(node->variable_decl_node.maybe_next_variable_decl);
             break;
+        
+        case Node_Value:
+            Node_Print(node->value_node.identifier_or_integer);
+            break;
+
         case Node_Program:
             Node_Print(node->program_node.variable_decl);
             break;
+
         default:
             printf("Undefined node type.");
             break;
@@ -735,15 +735,20 @@ typedef struct ParseStateSavePoint {
     Stack* node_stack;
     UInt nodes_created;
 
-    Token current_token;
     StringStream str;
-    bool has_token;
-
-    struct ParseStateSavePoint* prev;
 } ParseStateSavePoint;
 
 // Error_Alloc
-Error ParseStateSavePoint_Init(ParseStateSavePoint* p, Stack* node_stack) {
+Error ParseStateSavePoint_Init(ParseStateSavePoint* p, String* src) {
+    p->node_stack = malloc(sizeof(Stack));
+    if (p->node_stack == NULL) return Error_Alloc;
+    Error err = Stack_Init(p->node_stack, sizeof(Node), 8);
+    if (err == Error_Alloc) {
+        free(p->node_stack);
+        return Error_Alloc;
+    }
+    p->nodes_created = 0;
+    StringStream_Init(&p->str, src);
     return Error_Good;
 }
 
@@ -783,588 +788,217 @@ Error ParseStateSavePoint_SkipWhitespace(ParseStateSavePoint* p) {
     }
 }
 
+// Error_Alloc
 Error ParseStateSavePoint_AllocNode(ParseStateSavePoint* p, NodeType node_type, Node** ptr_to_node_out) {
-
+    Error err = Stack_Push(p->node_stack, NULL, (void**)ptr_to_node_out);
+    if (err == Error_Alloc) return Error_Alloc;
+    NOFAIL(err);
+    (**ptr_to_node_out).node_type = node_type;
+    p->nodes_created++;
+    return Error_Good;
 }
 
-typedef struct ParseState {
-    // a stack of Node
-    Stack object_stack;
+void ParseStateSavePoint_SaveLexerState(ParseStateSavePoint* p, StringStream* out) {
+    *out = p->str;
+}
 
-    // sometimes, we want to try multiple different branches.
-    // this would involve allocations in each branch. to get rid of any allocations from a failed branch,
-    // we simply set up a recorder to record the number of allocations. then, we can just pop them all if
-    // they failed. 
-    Stack num_to_pop;
-    UInt* cur_num_to_pop;
+void ParseStateSavePoint_RestoreLexerState(ParseStateSavePoint* p, StringStream* in) {
+    p->str = *in;
+}
 
-    Token current_token;
-    StringStream str;
-    bool has_token;
+String ParseStateSavePoint_GetNPreviousBytes(ParseStateSavePoint* p, UInt n) {
+    return StringStream_GetStringWithLength(&p->str, n);
+}
 
-} ParseState;
+String ParseStateSavePoint_GetNPreviousBytesDropPeeked(ParseStateSavePoint* p, UInt n) {
+    StringStream temp = p->str;
+    temp.pos--;
+    return StringStream_GetStringWithLength(&temp, n);
+}
+
+ParseStateSavePoint ParseStateSavePoint_CreateNewSavePoint(ParseStateSavePoint* p) {
+    ParseStateSavePoint ret = {
+        .node_stack = p->node_stack,
+        .nodes_created = 0,
+        .str = p->str
+    };
+
+    return ret;
+}
+
+void ParseStateSavePoint_Commit(const ParseStateSavePoint* save_point, ParseStateSavePoint* to_modify) {
+    to_modify->nodes_created += save_point->nodes_created;
+    to_modify->str = save_point->str;
+}
+
+Error ParseStateSavePoint_DestroySavePoint(ParseStateSavePoint* p) {
+    while (p->nodes_created > 0) {
+        NOFAIL(Stack_Pop(p->node_stack, NULL));
+        p->nodes_created--;
+    }
+    return Error_Good;
+}
+
+typedef Error(*ParseFunc)(ParseStateSavePoint*, Node**);
 
 // Error_Alloc
-Error ParseState_Init(ParseState* state, String* src) {
-    Error ret = Stack_Init(&state->object_stack, sizeof(Node), 256);
-    if (ret == Error_Alloc) goto err1;
-    NOFAIL(ret);
+// Error_ParseFailed
+Error ParseStateSavePoint_ParseOneOf(ParseStateSavePoint* p, ParseFunc func[], UInt number_of_functions, Node** node_ptr_out) {
+    Error err;
+    Node* node_ptr = NULL;
 
-    ret = Stack_Init(&state->num_to_pop, sizeof(UInt), 256);
-    if (ret == Error_Alloc) goto err2;
-    NOFAIL(ret);
+    for (UInt function_index = 0; function_index < number_of_functions; function_index++) {
+        err = (func[function_index])(p, &node_ptr);
+        if (err == Error_Alloc) {
+            return Error_Alloc;
+        } else if (err == Error_ParseFailed) {
+            continue;
+        } else if (err == Error_Good) {
+            *node_ptr_out = node_ptr;
+            return Error_Good;
+        } else {
+            return Error_Internal;
+        }
+    }
+    return Error_ParseFailed;
+}
 
-    UInt num_to_pop_initial = 0;
-    ret = Stack_Push(&state->num_to_pop, &num_to_pop_initial, (void**)&state->cur_num_to_pop);
-    if (ret == Error_Alloc) goto err3;
-    NOFAIL(ret);
+Error ParseStateSavePoint_ParseByte(ParseStateSavePoint* p, bool(*isValid)(byte))
 
-    StringStream_Init(&state->str, src);
-    state->has_token = false;
+// Error ParseStateSavePoint_ParseToken(ParseStateSavePoint* p, TokenType token_type, NodeType node_type_out, Node** ptr_to_node_out)
 
-    return Error_Good;
-    
-    err3:
-    Stack_Free(&state->num_to_pop);
-    err2:
-    Stack_Free(&state->object_stack);
-    err1:
+// Error_ParseFailed
+// Error_Alloc
+Error ParseStateSavePoint_ParseIdentifier(ParseStateSavePoint* p, Node** ptr_to_node_out) {
+    Error err;
+    byte b;
+    UInt identifier_length = 0;
+
+    StringStream before_lexing;
+    ParseStateSavePoint_SaveLexerState(p, &before_lexing);
+
+    NOFAIL(ParseStateSavePoint_SkipWhitespace(p));
+
+    // parse first char
+    err = ParseStateSavePoint_PeekByte(p, &b);
+    if (err == Error_Eof || !IsIdent(b)) {
+        // need to at least parse the first character to succeed
+        goto parse_failed;
+    } else {
+        // parsed first character successfully
+        ParseStateSavePoint_AdvanceByte(p);
+        identifier_length++;
+
+        while (true) {
+            err = ParseStateSavePoint_PeekByte(p, &b);
+            if (err == Error_Eof || !IsIdent(b)) {
+                err = ParseStateSavePoint_AllocNode(p, Node_Identifier, ptr_to_node_out);
+                if (err == Error_Alloc) goto alloc_error;
+                NOFAIL(err);
+
+                (**ptr_to_node_out).identifier_node.src = ParseStateSavePoint_GetNPreviousBytesDropPeeked(p, identifier_length);
+
+                return Error_Good;
+            } else {
+                ParseStateSavePoint_AdvanceByte(p);
+                identifier_length++;
+            }
+        }
+    }
+
+    parse_failed:
+    ParseStateSavePoint_RestoreLexerState(p, &before_lexing);
+    return Error_ParseFailed;
+
+    alloc_error:
+    ParseStateSavePoint_RestoreLexerState(p, &before_lexing);
     return Error_Alloc;
 }
 
+// Error_ParseFailed
 // Error_Alloc
-Error ParseState_AllocNode(ParseState* state, Node** node_ptr) {
-    Error err = Stack_Push(&state->object_stack, NULL, (void**)node_ptr);
-    if (err == Error_Alloc) return Error_Alloc;
-    NOFAIL(err);
-
-    (*state->cur_num_to_pop)++;
-
-    return Error_Good;
-}
-
-// Error_Alloc
-Error ParseState_CreateInteger(ParseState* p, Node** out, String* integer_data) {
-    Error err = ParseState_AllocNode(p, out);
-    if (err == Error_Alloc) return Error_Alloc;
-    NOFAIL(err);
-
-    Node* new_node = *out;
-    new_node->node_type = Node_Integer;
-    new_node->integer_node.src = *integer_data;
-
-    return Error_Good;
-}
-
-// Error_Alloc
-Error ParseState_CreateIdentifier(ParseState* p, Node** out, String* identifier_data) {
-    Error err = ParseState_AllocNode(p, out);
-    if (err == Error_Alloc) return Error_Alloc;
-    NOFAIL(err);
-
-    Node* new_node = *out;
-    new_node->node_type = Node_Identifier;
-    new_node->identifier_node.src = *identifier_data;
-
-    return Error_Good;
-}
-
-// Error_Alloc
-Error ParseState_CreateVariableDecl(ParseState* p, Node** out, Node* variable_name, Node* variable_value) {
-    Error err = ParseState_AllocNode(p, out);
-    if (err == Error_Alloc) return Error_Alloc;
-    NOFAIL(err);
-
-    Node* new_node = *out;
-    new_node->node_type = Node_VariableDecl;
-    new_node->variable_decl_node.variable_name = variable_name;
-    new_node->variable_decl_node.variable_value = variable_value;
-    new_node->variable_decl_node.maybe_next_variable_decl = NULL;
-
-    return Error_Good;
-}
-
-// Error_Alloc
-Error ParseState_NewPopCounter(ParseState* state) {
-    UInt num_to_pop_initial = 0;
-    Error err = Stack_Push(&state->num_to_pop, &num_to_pop_initial, (void**)&state->cur_num_to_pop);
-    if (err == Error_Alloc) return Error_Alloc;
-    NOFAIL(err);
-
-    return Error_Good;
-}
-
-// nofail
-Error ParseState_RevertPopCounter(ParseState* state) {
-    Error err;
-    for (UInt i = 0; i < *state->cur_num_to_pop; i++) {
-        err = Stack_Pop(&state->object_stack, NULL);
-        NOFAIL(err);
-    }
-    err = Stack_Pop(&state->num_to_pop, NULL);
-    NOFAIL(err);
-
-    err = Stack_Peek(&state->num_to_pop, (void**)&state->cur_num_to_pop, 0);
-    NOFAIL(err);
-
-    return Error_Good;
-}
-
-// nofail
-Error ParseState_CommitPopCounter(ParseState* state) {
-    Error err;
-    UInt extra_nodes_to_pop = 0;
-    err = Stack_Pop(&state->num_to_pop, &extra_nodes_to_pop);
-    NOFAIL(err);
-
-    err = Stack_Peek(&state->num_to_pop, (void**)&state->cur_num_to_pop, 0);
-    NOFAIL(err);
-
-    // make sure that if the current save state is failed, we pop the extra nodes created afterwards.
-    *(state->cur_num_to_pop) += extra_nodes_to_pop;
-
-    return Error_Good;
-}
-
-bool ParseState_DoesByteExistAt(ParseState* p, UInt pos) {
-    return p->src.length > pos;
-}
-
-byte ParseState_AtExtended(ParseState* p, UInt pos) {
-    return String_At(&p->src, pos);
-}
-
-byte ParseState_At(ParseState* p) {
-    return ParseState_AtExtended(p, p->pos);
-}
-
-// Error_Eof
-Error ParseState_Advance(ParseState* p) {
-    if (p->pos >= p->src.length - 1) {
-        p->eof_state = true;
-        return Error_Eof;
-    } else {
-        p->pos++;
-        return Error_Good;
-    }
-}
-
-const byte* ParseState_PosPtr(ParseState* p) {
-    return p->src.data + (uintptr_t)p->pos;
-}
-
-// Error_Eof
-Error ParseState_SkipWhitespace(ParseState* p, bool* was_newline) {
-    *was_newline = false;
-    while (true) {
-        byte b = ParseState_At(p);
-
-        // first check for whitespace
-        if (IsWhitespace(b)) {
-            if (b == '\n') *was_newline = true;
-            Error err = ParseState_Advance(p);
-            if (err == Error_Eof) return Error_Eof;
-            NOFAIL(err);
-            continue;
-        } else {
-            return Error_Good;
-        }
-    }
-}
-
-bool ParseState_IsNextByte(ParseState* p, byte b) {
-    if (!ParseState_DoesByteExistAt(p, p->pos + 1)) {
-        // if we hit end of string, then the byte doesn't match
-        return false;
-    } else {
-        return ParseState_AtExtended(p, p->pos + 1) == b;
-    }
-}
-
-// this function is just looking for a newline. it doesn't care about the start of the line comment.
-// Error_Eof: only if there was no newlines before the end of the file!
-Error ParseState_ParseLineComment(ParseState* p) {
-    Error err;
-
-    while (true) {
-        byte b = ParseState_At(p);
-        err = ParseState_Advance(p);
-        if (b == (byte)'\n') {
-            return Error_Good;
-        }
-        if (err == Error_Eof) return Error_Eof;
-    }
-}
-
-// this function is just looking for a */
-// it doesn't care about the start of the line comment.
-// Error_ParseFailed: if there wasn't a closing */
-Error ParseState_ParseBlockComment(ParseState* p) {
-    Error err;
-
-    bool was_star = false;
-    while (true) {
-        byte b = ParseState_At(p);
-        err = ParseState_Advance(p);
-        
-        if (was_star && b == (byte)'/') {
-            return Error_Good;
-        } else if (b == (byte)'*') {
-            was_star = true;
-        } else {
-            was_star = false;
-        }
-
-        if (err == Error_Eof) return Error_ParseFailed;
-    }
-}
-
-struct KeywordMap {
-    UInt len;
-    const char* kw;
-    TokenType t;
-};
-
-static const struct KeywordMap keyword_map[] = {
-    {2, "do", Token_Do},
-    {2, "if", Token_If},
-    {3, "for", Token_For},
-    {3, "int", Token_Int},
-    {4, "auto", Token_Auto},
-    {4, "case", Token_Case},
-    {4, "char", Token_Char},
-    {4, "else", Token_Else},
-    {4, "enum", Token_Enum},
-    {4, "goto", Token_Goto},
-    {4, "long", Token_Long},
-    {4, "void", Token_Void},
-    {5, "break", Token_Break},
-    {5, "const", Token_Const},
-    {5, "float", Token_Float},
-    {5, "short", Token_Short},
-    {5, "union", Token_Union},
-    {5, "while", Token_While},
-    {6, "double", Token_Double},
-    {6, "extern", Token_Extern},
-    {6, "inline", Token_Inline},
-    {6, "return", Token_Return},
-    {6, "signed", Token_Signed},
-    {6, "sizeof", Token_Sizeof},
-    {6, "static", Token_Static},
-    {6, "struct", Token_Struct},
-    {6, "switch", Token_Switch},
-    {7, "typedef", Token_Typedef},
-    {7, "default", Token_Default},
-    {8, "register", Token_Register},
-    {8, "restrict", Token_Restrict},
-    {8, "unsigned", Token_Unsigned},
-    {8, "volatile", Token_Volatile},
-    {8, "continue", Token_Continue}
-};
-
-void ParseState_CheckForKeywords(ParseState* p, const byte* first_char_ptr, UInt token_length, TokenType* token_type_out) {
-    for (UInt i = 0; i < sizeof(keyword_map) / sizeof(*keyword_map); i++) {
-        if (keyword_map[i].len == token_length) {
-            if (memcmp(keyword_map[i].kw, first_char_ptr, token_length) == 0) {
-                *token_type_out = keyword_map[i].t;
-            }
-        }
-    }
-}
-
-// assumes the current character is already an identifier character.
-Error ParseState_ParseIdentifierOrKeyword(ParseState* p, const byte** first_char_ptr_out, UInt* token_length_out, TokenType* token_type_out) {
+Error ParseStateSavePoint_ParseInteger(ParseStateSavePoint* p, Node** ptr_to_node_out) {
     Error err;
     byte b;
+    UInt integer_length = 0;
 
-    *first_char_ptr_out = ParseState_PosPtr(p);
-    *token_length_out = 1;
-    *token_type_out = Token_Identifier;
-    
-    while (true) {
-        err = ParseState_Advance(p);
-        if (err == Error_Eof) break;
-        NOFAIL(err);
+    StringStream before_lexing;
+    ParseStateSavePoint_SaveLexerState(p, &before_lexing);
 
-        b = ParseState_At(p);
+    NOFAIL(ParseStateSavePoint_SkipWhitespace(p));
 
-        if (IsIdent(b) || IsInteger(b)) {
-            (*token_length_out)++;
-        } else {
-            break;
-        }
-    }
-
-    ParseState_CheckForKeywords(p, *first_char_ptr_out, *token_length_out, token_type_out);
-    return Error_Good;
-}
-
-// Error_Eof
-// Error_ParseFailed: unknown token.
-Error ParseState_NextTokenHelper(ParseState* p, const byte** first_char_ptr_out, UInt* token_length_out, TokenType* token_type_out) {
-    Error err = Error_Good;
-
-    if (p->eof_state) return Error_Eof;
-
-    bool was_newline = false;
-    
-    err = ParseState_SkipWhitespace(p, &was_newline);
-    if (err == Error_Eof) return Error_Eof;
-    NOFAIL(err);
-
-    byte b = ParseState_At(p);
-    if (IsInteger(b)) {
-        *first_char_ptr_out = ParseState_PosPtr(p);
-        *token_length_out = 1;
-        *token_type_out = Token_Integer;
+    // parse first char
+    err = ParseStateSavePoint_PeekByte(p, &b);
+    if (err == Error_Eof || !IsInteger(b)) {
+        // need to at least parse the first character to succeed
+        ParseStateSavePoint_RestoreLexerState(p, &before_lexing);
+        goto parse_failed;
+    } else {
+        // parsed first character successfully
+        ParseStateSavePoint_AdvanceByte(p);
+        integer_length++;
 
         while (true) {
-            err = ParseState_Advance(p);
-            if (err == Error_Eof) return Error_Good;
-            NOFAIL(err);
+            err = ParseStateSavePoint_PeekByte(p, &b);
+            if (err == Error_Eof || !IsInteger(b)) {
+                err = ParseStateSavePoint_AllocNode(p, Node_Integer, ptr_to_node_out);
+                if (err == Error_Alloc) goto alloc_error;
+                NOFAIL(err);
 
-            b = ParseState_At(p);
+                (**ptr_to_node_out).integer_node.src = ParseStateSavePoint_GetNPreviousBytesDropPeeked(p, integer_length);
 
-            if (IsInteger(b)) {
-                (*token_length_out)++;
-            } else {
                 return Error_Good;
+            } else {
+                ParseStateSavePoint_AdvanceByte(p);
+                integer_length++;
             }
         }
-    } else if (IsIdent(b)) {
-        err = ParseState_ParseIdentifierOrKeyword(p, first_char_ptr_out, token_length_out, token_type_out);
-        NOFAIL(err);
-        return Error_Good;
-    } else if (b == '+') {
-        *first_char_ptr_out = ParseState_PosPtr(p);
-        *token_length_out = 1;
-        *token_type_out = Token_Plus;
-
-        ParseState_Advance(p);
-        return Error_Good;
-    } else if (b == '=') {
-        *first_char_ptr_out = ParseState_PosPtr(p);
-        *token_length_out = 1;
-        *token_type_out = Token_Eq;
-
-        ParseState_Advance(p);
-        return Error_Good;
-    } else if (b == '/') {
-        if (ParseState_IsNextByte(p, '/')) {
-            // this is a line comment
-            err = ParseState_ParseLineComment(p);
-            if (err == Error_Eof) return Error_Eof;
-            NOFAIL(err);
-        } else if (ParseState_IsNextByte(p, '*')) {
-            // this is a block comment
-            err = ParseState_ParseBlockComment(p);
-            if (err == Error_ParseFailed) return Error_ParseFailed;
-            NOFAIL(err);
-        } else {
-            // just a regular division
-            *first_char_ptr_out = ParseState_PosPtr(p);
-            *token_length_out = 1;
-            *token_type_out = Token_Division;
-            
-            ParseState_Advance(p);
-            return Error_Good;
-        }
-    } else {
-        return Error_ParseFailed;
     }
+
+    parse_failed:
+    ParseStateSavePoint_RestoreLexerState(p, &before_lexing);
+    return Error_ParseFailed;
+
+    alloc_error:
+    ParseStateSavePoint_RestoreLexerState(p, &before_lexing);
+    return Error_Alloc;
+}
+
+// Error_ParseFailed
+// Error_Alloc
+Error ParseStateSavePoint_ParseValue(ParseStateSavePoint* p, Node** ptr_to_node_out) {
+    Error err;
+    ParseStateSavePoint save_point = ParseStateSavePoint_CreateNewSavePoint(p);
+
+    Node* identifier_or_integer = NULL;
+    ParseFunc funcs[] = {
+        &ParseStateSavePoint_ParseIdentifier,
+        &ParseStateSavePoint_ParseInteger
+    };
+
+    err = ParseStateSavePoint_ParseOneOf(&save_point, funcs, 2, &identifier_or_integer);
+    if (err == Error_Alloc) goto was_err;
+    if (err == Error_ParseFailed) goto was_err;
+    NOFAIL(err);
+
+    err = ParseStateSavePoint_AllocNode(&save_point, Node_Value, ptr_to_node_out);
+    if (err == Error_Alloc) goto was_err;
+    NOFAIL(err);
+
+    // here we set the values of the new value node.
+    if (identifier_or_integer->node_type == Node_Identifier || identifier_or_integer->node_type == Node_Integer) {
+        (**ptr_to_node_out).value_node.identifier_or_integer = identifier_or_integer;
+    } else {
+        return Error_Internal;
+    }
+
+    // now commit the savepoint
+    ParseStateSavePoint_Commit(&save_point, p);
     return Error_Good;
-}
 
-// Error_ParseFailed
-Error ParseState_PeekToken(ParseState* p, Token* out) {
-    if (p->has_token) {
-        *out = p->current_token;
-        return Error_Good;
-    }
-
-    const byte* token_data_ptr = NULL;
-    UInt token_length;
-    TokenType token_type;
-
-    Error err = ParseState_NextTokenHelper(p, &token_data_ptr, &token_length, &token_type);
-    if (err == Error_Eof) {
-        p->current_token.token_type = Token_Eof;
-        *out = p->current_token;
-        p->has_token = true;
-        return Error_Good;
-    } else if (err == Error_ParseFailed) {
-        p->has_token = false;
-        return Error_ParseFailed;
-    } else {
-        NOFAIL(err);
-        p->current_token = Token_Create(token_type, token_data_ptr, token_length);
-        *out = p->current_token;
-        p->has_token = true;
-        return Error_Good;
-    }
-}
-
-void ParseState_ConsumeToken(ParseState* p) {
-    p->has_token = false;
-}
-
-// Error_ParseFailed
-Error ParseState_SkipToken(ParseState* p, TokenType token_to_skip) {
-    Token token;
-    Error err;
-    
-    err = ParseState_PeekToken(p, &token);
-    if (err == Error_ParseFailed) return Error_ParseFailed;
-    NOFAIL(err);
-
-    if (token.token_type != token_to_skip) {
-        return Error_ParseFailed;
-    } else {
-        ParseState_ConsumeToken(p);
-    }
-
-    return Error_Good;
-}
-
-// Error_Alloc
-// Error_ParseFailed
-Error ParseState_ParseInteger(ParseState* p, Node** out) {
-    Error err;
-    Token token;
-
-    err = ParseState_PeekToken(p, &token);
-    if (err == Error_ParseFailed) return Error_ParseFailed;
-    NOFAIL(err);
-
-    if (token.token_type == Token_Integer) {
-        ParseState_ConsumeToken(p);
-
-        // allocate and create the node
-        err = ParseState_CreateInteger(p, out, &token.token_data);
-        if (err == Error_Alloc) return Error_Alloc;
-        NOFAIL(err);
-
-        return Error_Good;
-    } else {
-        return Error_ParseFailed;
-    }
-}
-
-// Error_Alloc
-// Error_ParseFailed
-Error ParseState_ParseIdentifier(ParseState* p, Node** out) {
-    Error err;
-    Token token;
-
-    err = ParseState_PeekToken(p, &token);
-    if (err == Error_ParseFailed) return Error_ParseFailed;
-    NOFAIL(err);
-
-    if (token.token_type == Token_Identifier) {
-        ParseState_ConsumeToken(p);
-
-        // allocate the node
-        err = ParseState_CreateIdentifier(p, out, &token.token_data);
-        if (err == Error_Alloc) return Error_Alloc;
-        NOFAIL(err);
-
-        return Error_Good;
-    } else {
-        return Error_ParseFailed;
-    }
-}
-
-// Error_Alloc
-// Error_ParseFailed
-Error ParseState_ParseOneOrMoreVariableDecl(ParseState* p, Node** out) {
-    Error err;
-
-    Node* current_output_loc = NULL;
-    Node* variable_name = NULL;
-    Node* variable_value = NULL;
-    bool parsed_at_least_one = false;
-    while (true) {
-        // set up the pop stack so we can revert if the parsing goes wrong
-        err = ParseState_NewPopCounter(p);
-        if (err == Error_Alloc) return Error_Alloc;
-        NOFAIL(err);
-
-        // first parse the variable name
-        err = ParseState_ParseIdentifier(p, &variable_name);
-        if (err == Error_Alloc) return Error_Alloc;
-        if (err == Error_ParseFailed) goto failed_parse;
-        NOFAIL(err);
-
-        // now parse the equals sign
-        err = ParseState_SkipToken(p, Token_Eq);
-        if (err == Error_ParseFailed) goto failed_parse;
-        NOFAIL(err);
-
-        // now parse the variable value
-        err = ParseState_ParseInteger(p, &variable_value);
-        if (err == Error_Alloc) return Error_Alloc;
-        if (err == Error_ParseFailed) goto failed_parse;
-        NOFAIL(err);
-
-        // done parsing, now create the node.
-        // we only want to output the first variable declaration node in the tree.
-        // when parsing the rest, we just put the address to the node in our local variable current_output_loc.
-        if (parsed_at_least_one) {
-            Node* new_output_loc = NULL;
-            // first read into our temporary variable.
-            err = ParseState_CreateVariableDecl(p, &new_output_loc, variable_name, variable_value);
-            if (err == Error_Alloc) return Error_Alloc;
-            NOFAIL(err);
-            // now just place that new node as a child of current_output_loc.
-            current_output_loc->variable_decl_node.maybe_next_variable_decl = new_output_loc;
-            // finally, replace current_output_loc with the new variable.
-            current_output_loc = new_output_loc;
-        } else {
-            err = ParseState_CreateVariableDecl(p, out, variable_name, variable_value);
-            if (err == Error_Alloc) return Error_Alloc;
-            NOFAIL(err);
-            
-            // make sure to save the current node so that we can append to it later.
-            current_output_loc = *out;
-            parsed_at_least_one = true;
-        }
-
-        // since nothing failed, commit the changes of the current node.
-        ParseState_CommitPopCounter(p);
-        
-        // now try parsing the next variable declaration
-        // set the output location to the pointer to the next variable decl in the struct we just created.
-
-        // make sure to skip over the error handling code below.
-        continue;
-
-        failed_parse:
-        ParseState_RevertPopCounter(p);
-        if (parsed_at_least_one) {
-            return Error_Good;
-        } else {
-            return Error_ParseFailed;
-        }
-    }
-}
-
-// Error_Alloc
-// Error_ParseFailed
-Error ParseState_ParseProgram(ParseState* p, Node** out) {
-    Error err;
-    err = ParseState_AllocNode(p, out);
-    if (err == Error_Alloc) return Error_Alloc;
-    NOFAIL(err);
-
-    Node* node_ptr = *out;
-    node_ptr->node_type = Node_Program;
-
-    err = ParseState_ParseOneOrMoreVariableDecl(p, &node_ptr->program_node.variable_decl);
-    if (err == Error_Alloc) return Error_Alloc;
-    if (err == Error_ParseFailed) return Error_ParseFailed;
-    NOFAIL(err);
-
-    return Error_Good;
+    was_err:
+    NOFAIL(ParseStateSavePoint_DestroySavePoint(&save_point));
+    return err;
 }
 
 typedef enum StateInstructionType {
@@ -1455,15 +1089,26 @@ int main(void) {
     IF_ERR(Error_WhileReadingFile, "while reading file.");
     NOFAIL;
 
-    ParseState state;
-    err = ParseState_Init(&state, test_program);
+    ParseStateSavePoint state;
+    err = ParseStateSavePoint_Init(&state, &test_program);
+    IF_ERR(Error_Alloc, "allocation failure.");
     NOFAIL;
 
-    Node* node_ptr = NULL;
-    err = ParseState_ParseProgram(&state, &node_ptr);
+    Node* node = NULL;
+    err = ParseStateSavePoint_ParseValue(&state, &node);
+    IF_ERR(Error_ParseFailed, "parse failure.");
+    IF_ERR(Error_Alloc, "allocation failure.");
     NOFAIL;
 
-    Node_Print(node_ptr);
+    Node_Print(node);
+
+    err = ParseStateSavePoint_ParseValue(&state, &node);
+    IF_ERR(Error_ParseFailed, "parse failure.");
+    IF_ERR(Error_Alloc, "allocation failure.");
+    NOFAIL;
+
+    Node_Print(node);
+
     printf("\nC program:\n");
 
     return 0;
