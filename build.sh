@@ -1,3 +1,3 @@
 #!/usr/bin/bash
 
-clang -Wall -Wpedantic -g -O0 main.c -o main
+clang -Wall -Wpedantic -Wno-newline-eof -g -O0 stack.c err.c main.c -o main
