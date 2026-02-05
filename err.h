@@ -48,3 +48,15 @@ typedef enum Error
     {                    \
         return err_type; \
     }
+
+#define ASSERT(cond)           \
+    if (!(cond))               \
+    {                          \
+        return Error_Internal; \
+    }
+
+#define NOFAIL_SKIP_PARSE_FAILURE(err)                                \
+    if ((err) != Error_ParseFailed && (err) != Error_UnexpectedToken) \
+    {                                                                 \
+        NOFAIL(err);                                                  \
+    }
