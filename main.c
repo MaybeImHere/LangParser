@@ -132,6 +132,8 @@ typedef enum TokenType {
     Token_Asterisk,
     Token_OpenParen,
     Token_CloseParen,
+    Token_OpenBracket,
+    Token_CloseBracket,
     Token_Eq,
     Token_Division,
     Token_Semicolon,
@@ -152,13 +154,11 @@ Token Token_Create(TokenType token_type, const byte *data, UInt length) {
     return ret;
 }
 
-static const char *token_map[] = {"Token_Integer",   "Token_Identifier",
-
-                                  "Token_Plus",      "Token_Minus",      "Token_Asterisk",
-                                  "Token_OpenParen", "Token_CloseParen", "Token_Eq",
-                                  "Token_Division",  "Token_Semicolon",  "Token_Eof",
-
-                                  "Token_If",        "Token_Else"};
+static const char *token_map[] = {"Token_Integer",    "Token_Identifier",  "Token_Plus",
+                                  "Token_Minus",      "Token_Asterisk",    "Token_OpenParen",
+                                  "Token_CloseParen", "Token_OpenBracket", "Token_CloseBracket",
+                                  "Token_Eq",         "Token_Division",    "Token_Semicolon",
+                                  "Token_Eof",        "Token_If",          "Token_Else"};
 
 void Token_Print(const Token *token) {
     printf("%s '", token_map[token->token_type]);
@@ -215,6 +215,12 @@ bool Token_GetSingleByteToken(byte b, TokenType *out) {
         return true;
     case ';':
         *out = Token_Semicolon;
+        return true;
+    case '{':
+        *out = Token_OpenBracket;
+        return true;
+    case '}':
+        *out = Token_CloseBracket;
         return true;
     default:
         return false;
@@ -283,33 +289,6 @@ start:
     return Error_Good;
 }
 
-typedef enum NodeType {
-    Node_Integer,
-    Node_Identifier,
-    Node_Value,
-    Node_VariableExprAtom,
-    Node_VariableExpr,
-    Node_VariableDecl,
-    Node_Add,
-    Node_BooleanExpr,
-    Node_IfBlock,
-    Node_Program
-} NodeType;
-
-typedef struct Node {
-    NodeType node_type;
-
-    union {
-        IntegerNode integer;
-        IdentifierNode ident;
-        ValueNode value;
-        VariableExprAtom variable_expr_atom;
-        VariableExpr variable_expr;
-        VariableDecl variable_decl_node;
-        Program program_node;
-    };
-} Node;
-
 void Node_Print(Node *node) {
     if (node == NULL)
         return;
@@ -354,7 +333,7 @@ void Node_Print(Node *node) {
         } else if (node->variable_expr.type == Expr_SingleAtom) {
             Node_Print(node->variable_expr.lhs);
         } else {
-            printf("Internal print error.");
+            printf("main(%d): Unknown variable expression type.", __LINE__);
         }
         break;
 
@@ -364,6 +343,15 @@ void Node_Print(Node *node) {
         Node_Print(node->variable_decl_node.variable_expr);
         break;
 
+    case Node_BooleanExpr:
+        if (node->boolean_expr.type == BoolExpr_Eq) {
+            Node_Print(node->boolean_expr.rhs);
+            printf(" = ");
+            Node_Print(node->boolean_expr.lhs);
+        } else {
+            printf("main(%d): Unknown boolean expression type.", __LINE__);
+        }
+        break;
     case Node_Program:
         Node_Print(node->program_node.variable_decl);
         break;
@@ -382,6 +370,8 @@ typedef struct ParseState {
 
     // will be used to restore the stack to a previous state should a function fail.
     SaveStackSaveState stack_save_state;
+
+    Error last_error;
 } ParseState;
 
 // Error_Alloc
@@ -392,6 +382,8 @@ Error ParseState_Init(ParseState *p, const String *src) {
     NOFAIL(err);
 
     p->stack_save_state = SaveStack_SaveState(&p->stack);
+
+    p->last_error = Error_Good;
 
     return Error_Good;
 }
@@ -417,196 +409,172 @@ void ParseState_Undo(ParseState *bad_state) {
     SaveStack_RestoreState(&bad_state->stack, &bad_state->stack_save_state);
 }
 
-// Error_UnknownToken
-// Error_UnexpectedToken
-Error Node_ParseToken(ParseState *state, TokenType expected_token, String *out) {
-    Error err;
-    ParseState save = ParseState_Save(state);
+Node *ParseState_CreateNode(ParseState *state) {
+    Node *ret = NULL;
+    state->last_error = SaveStack_Push(&state->stack, ret);
+    return ret;
+}
+
+#define PARSE_FUNC_INIT                                                                            \
+    Error err;                                                                                     \
+    ParseState save = ParseState_Save(state);                                                      \
+    state->last_error = Error_ParseFailed;
+
+#define PARSE_FUNC_DONE_GOOD                                                                       \
+    {                                                                                              \
+        state->last_error = Error_Good;                                                            \
+        ParseState_Apply(state, &save);                                                            \
+        return true;                                                                               \
+    }
+
+#define PARSE_FUNC_DONE_ERR                                                                        \
+    {                                                                                              \
+        ParseState_Undo(&save);                                                                    \
+        return false;                                                                              \
+    }
+
+bool ParseState_CanRecover(ParseState *state) {
+    return state->last_error == Error_Good || state->last_error == Error_UnexpectedToken ||
+           state->last_error == Error_ParseFailed;
+}
+
+// All parsing functions return true if successful.
+bool Node_ParseToken(ParseState *state, TokenType expected_token, String *out) {
+    PARSE_FUNC_INIT;
+
     Token t;
 
     err = Token_Parse(&save.stream, &t);
-    BUBBLE(Error_UnknownToken);
-    NOFAIL(err);
+    if (err == Error_Good) {
+        if (t.token_type == expected_token) {
+            // successfully parsed.
+            if (out != NULL)
+                *out = t.token_data;
 
-    if (t.token_type != expected_token)
-        return Error_UnexpectedToken;
+            PARSE_FUNC_DONE_GOOD;
+        }
+        state->last_error = Error_UnexpectedToken;
+    } else {
+        if (err == Error_UnknownToken) {
+            state->last_error = Error_UnknownToken;
+        } else {
+            state->last_error = Error_Internal;
+        }
+    }
 
-    if (out != NULL)
-        *out = t.token_data;
-    ParseState_Apply(state, &save);
-    return Error_Good;
+    PARSE_FUNC_DONE_ERR;
 }
 
-// Error_UnknownToken
-// Error_UnexpectedToken
-// Error_Alloc
-Error Node_ParseTokenNode(ParseState *state, TokenType expected_token, NodeType node_type,
-                          size_t string_offset, Node **node_ptr_out) {
-    Error err;
-    ParseState save = ParseState_Save(state);
-    String token_str;
+bool Node_ParseInteger(ParseState *state, Node **node_ptr_out) {
+    PARSE_FUNC_INIT;
 
-    err = Node_ParseToken(&save, expected_token, &token_str);
-    BUBBLE(Error_UnknownToken);
-    BUBBLE(Error_UnexpectedToken);
-    NOFAIL(err);
+    String integer;
+    if (Node_ParseToken(&save, Token_Integer, &integer)) {
+        Node *new_node = ParseState_CreateNode(&save);
+        if (new_node) {
+            new_node->integer.src = integer;
+            *node_ptr_out = new_node;
+            PARSE_FUNC_DONE_GOOD;
+        }
+    }
 
-    err = SaveStack_Push(&save.stack, (void **)node_ptr_out);
-    BUBBLE(Error_Alloc);
-    NOFAIL(err);
-
-    (*node_ptr_out)->node_type = node_type;
-    // we need to cast to byte, since string_offset should be bytes from the start of the node
-    // struct.
-    *((String *)((byte *)*node_ptr_out + string_offset)) = token_str;
-
-    ParseState_Apply(state, &save);
-    return Error_Good;
+    PARSE_FUNC_DONE_ERR;
 }
 
-// Error_UnknownToken
-// Error_UnexpectedToken
-// Error_Alloc
-Error Node_ParseInteger(ParseState *state, Node **node_ptr_out) {
-    Error err;
-    err = Node_ParseTokenNode(state, Token_Integer, Node_Integer, offsetof(Node, integer.src),
-                              node_ptr_out);
-    BUBBLE(Error_UnknownToken);
-    BUBBLE(Error_UnexpectedToken);
-    BUBBLE(Error_Alloc);
-    NOFAIL(err);
+bool Node_ParseIdentifier(ParseState *state, Node **node_ptr_out) {
+    PARSE_FUNC_INIT;
 
-    return Error_Good;
+    String identifier;
+    if (Node_ParseToken(&save, Token_Identifier, &identifier)) {
+        Node *new_node = ParseState_CreateNode(&save);
+        if (new_node) {
+            new_node->ident.src = identifier;
+            *node_ptr_out = new_node;
+            PARSE_FUNC_DONE_GOOD;
+        }
+    }
+
+    PARSE_FUNC_DONE_ERR;
 }
 
-// Error_UnknownToken
-// Error_UnexpectedToken
-// Error_Alloc
-Error Node_ParseIdentifier(ParseState *state, Node **node_ptr_out) {
-    Error err;
-    err = Node_ParseTokenNode(state, Token_Identifier, Node_Identifier, offsetof(Node, ident.src),
-                              node_ptr_out);
-    BUBBLE(Error_UnknownToken);
-    BUBBLE(Error_UnexpectedToken);
-    BUBBLE(Error_Alloc);
-    NOFAIL(err);
+bool Node_ParseValue(ParseState *state, Node **node_ptr_out) {
+    PARSE_FUNC_INIT;
 
-    return Error_Good;
+    Node *identifier_or_integer = NULL;
+    if (Node_ParseIdentifier(&save, &identifier_or_integer)) {
+        goto create_node;
+    }
+
+    if (!ParseState_CanRecover(&save))
+        PARSE_FUNC_DONE_ERR;
+
+    if (Node_ParseInteger(&save, &identifier_or_integer)) {
+        goto create_node;
+    }
+
+    PARSE_FUNC_DONE_ERR;
+
+create_node:
+    Node *new_node = ParseState_CreateNode(&save);
+    if (new_node) {
+        new_node->value.identifier_or_integer = identifier_or_integer;
+        *node_ptr_out = new_node;
+        PARSE_FUNC_DONE_GOOD;
+    }
+    PARSE_FUNC_DONE_ERR;
 }
 
-// Error_UnknownToken
-// Error_ParseFailed
-// Error_Alloc
-Error Node_ParseValue(ParseState *state, Node **node_ptr_out) {
-    Error err;
-    ParseState save = ParseState_Save(state);
+bool Node_ParseVariableExprAtom(ParseState *state, Node **node_ptr_out);
 
-    Node *integer_or_identifier = NULL;
-
-    err = Node_ParseInteger(&save, &integer_or_identifier);
-    // non recoverable errors.
-    BUBBLE(Error_UnknownToken);
-    BUBBLE(Error_Alloc);
-    if (err == Error_Good)
-        goto good;
-    NOFAIL_SKIP_PARSE_FAILURE(err);
-
-    // now try parsing an identifier.
-    err = Node_ParseIdentifier(&save, &integer_or_identifier);
-    BUBBLE(Error_UnknownToken);
-    if (err == Error_UnexpectedToken)
-        return Error_ParseFailed;
-    BUBBLE(Error_Alloc);
-    NOFAIL(err);
-
-good:
-    ASSERT(integer_or_identifier != NULL);
-
-    Node *value = NULL;
-    err = SaveStack_Push(&state->stack, (void **)&value);
-    BUBBLE(Error_Alloc);
-    NOFAIL(err);
-
-    value->node_type = Node_Value;
-    value->value.identifier_or_integer = integer_or_identifier;
-
-    *node_ptr_out = value;
-
-    ParseState_Apply(state, &save);
-    return Error_Good;
-}
-
-Error Node_ParseVariableExprAtom(ParseState *state, Node **node_ptr_out);
-
-// Error_UnknownToken
-// Error_ParseFailed
-// Error_Alloc
-Error Node_ParseVariableExpr(ParseState *state, Node **node_ptr_out) {
-    Error err;
-    ParseState save = ParseState_Save(state);
+bool Node_ParseVariableExpr(ParseState *state, Node **node_ptr_out) {
+    PARSE_FUNC_INIT;
 
     enum VariableExprType expr_type;
     Node *expr_atom_lhs = NULL;
     Node *expr_atom_rhs = NULL;
 
-    // parse the first atom.
-    err = Node_ParseVariableExprAtom(&save, &expr_atom_lhs);
-    BUBBLE(Error_UnknownToken);
-    BUBBLE(Error_ParseFailed);
-    BUBBLE(Error_Alloc);
-    NOFAIL(err);
+    if (!Node_ParseVariableExprAtom(&save, &expr_atom_lhs))
+        PARSE_FUNC_DONE_ERR;
 
-    // now try parsing the operator, + - *
-    // maybe parse a +
-    err = Node_ParseToken(&save, Token_Plus, NULL);
-    if (err == Error_Good) {
+    // +
+    if (Node_ParseToken(&save, Token_Plus, NULL)) {
         expr_type = Expr_Add;
-        goto parse_rhs;
+        goto parsed_operator;
     }
-    BUBBLE(Error_UnknownToken);
-    NOFAIL_SKIP_PARSE_FAILURE(err);
 
-    // maybe parse a -
-    err = Node_ParseToken(&save, Token_Minus, NULL);
-    if (err == Error_Good) {
+    if (!ParseState_CanRecover(&save))
+        PARSE_FUNC_DONE_ERR;
+
+    // -
+    if (Node_ParseToken(&save, Token_Minus, NULL)) {
         expr_type = Expr_Sub;
-        goto parse_rhs;
+        goto parsed_operator;
     }
-    BUBBLE(Error_UnknownToken);
-    NOFAIL_SKIP_PARSE_FAILURE(err);
 
-    // if this one fails, there are no other possible binary operators, so just quit parsing in this
-    // function. maybe parse a *
-    err = Node_ParseToken(&save, Token_Asterisk, NULL);
-    if (err == Error_Good) {
+    if (!ParseState_CanRecover(&save))
+        PARSE_FUNC_DONE_ERR;
+
+    // *
+    if (Node_ParseToken(&save, Token_Asterisk, NULL)) {
         expr_type = Expr_Mul;
-        goto parse_rhs;
+        goto parsed_operator;
     }
-    BUBBLE(Error_UnknownToken);
-    if (err == Error_UnexpectedToken) {
-        // no operator was present, so it was just a lone value like in "a = 2"
-        expr_type = Expr_SingleAtom;
-        goto create_expr_node;
-    }
-    NOFAIL(err);
 
-parse_rhs:
-    // done parsing the operator, now parse the second expression atom
-    err = Node_ParseVariableExprAtom(&save, &expr_atom_rhs);
-    BUBBLE(Error_UnknownToken);
-    BUBBLE(Error_ParseFailed);
-    BUBBLE(Error_Alloc);
-    NOFAIL(err);
-    goto create_expr_node;
+    if (!ParseState_CanRecover(&save))
+        PARSE_FUNC_DONE_ERR;
 
-create_expr_node:
-    // done parsing, so create the node.
-    ASSERT(expr_atom_lhs != NULL &&
-           (expr_atom_rhs != NULL || (expr_atom_rhs == NULL && expr_type == Expr_SingleAtom)));
+    // just a lonely value in the declaration "a = 2;"
+    // since rhs is already null, just reuse this operator code.
+    goto create_node;
+
+parsed_operator:
+    if (!Node_ParseVariableExprAtom(&save, &expr_atom_rhs))
+        PARSE_FUNC_DONE_ERR;
+
+create_node:
     Node *variable_expr = NULL;
-    err = SaveStack_Push(&state->stack, (void **)&variable_expr);
-    BUBBLE(Error_Alloc);
-    NOFAIL(err);
+    if (!(variable_expr = ParseState_CreateNode(&save)))
+        PARSE_FUNC_DONE_ERR;
 
     variable_expr->node_type = Node_VariableExpr;
     variable_expr->variable_expr.type = expr_type;
@@ -614,10 +582,10 @@ create_expr_node:
     variable_expr->variable_expr.rhs = expr_atom_rhs;
 
     *node_ptr_out = variable_expr;
+    PARSE_FUNC_DONE_GOOD;
 
-    // now one of the two above succeeded, so continue.
-    ParseState_Apply(state, &save);
-    return Error_Good;
+    if (ParseState_CanRecover(&save))
+        PARSE_FUNC_DONE_ERR;
 }
 
 // expr-atom := '(' expr ')' | value
@@ -734,6 +702,179 @@ Error Node_ParseVariableDecl(ParseState *state, Node **node_ptr_out) {
     new_variable_decl_node->variable_decl_node.variable_expr = variable_expr;
 
     *node_ptr_out = new_variable_decl_node;
+    ParseState_Apply(state, &save);
+
+    return Error_Good;
+}
+
+// Error_UnknownToken
+// Error_ParseFailed
+// Error_Alloc
+Error Node_ParseBooleanExpr(ParseState *state, Node **node_ptr_out) {
+    Error err;
+    ParseState save = ParseState_Save(state);
+
+    enum BooleanExprType type;
+    Node *lhs = NULL;
+    Node *rhs = NULL;
+
+    // parse the left side of the expression.
+    err = Node_ParseVariableExprAtom(&save, &lhs);
+    BUBBLE(Error_UnknownToken);
+    BUBBLE(Error_ParseFailed);
+    BUBBLE(Error_Alloc);
+    NOFAIL(err);
+
+    // parse the equals
+    err = Node_ParseToken(&save, Token_Eq, NULL);
+    BUBBLE(Error_UnknownToken);
+    if (err == Error_UnexpectedToken)
+        return Error_ParseFailed;
+    NOFAIL(err);
+    type = BoolExpr_Eq;
+
+    // parse the right side of the expression.
+    err = Node_ParseVariableExprAtom(&save, &rhs);
+    BUBBLE(Error_UnknownToken);
+    BUBBLE(Error_ParseFailed);
+    BUBBLE(Error_Alloc);
+    NOFAIL(err);
+
+    // now that we are done, check to make sure that the nodes were actually created.
+    ASSERT(lhs != NULL && rhs != NULL);
+
+    // now create the node on the stack
+    Node *new_bool_expr_node = NULL;
+    err = SaveStack_Push(&save.stack, (void **)&new_bool_expr_node);
+    BUBBLE(Error_Alloc);
+    NOFAIL(err);
+
+    // initialize the node
+    new_bool_expr_node->node_type = Node_BooleanExpr;
+    new_bool_expr_node->boolean_expr.type = type;
+    new_bool_expr_node->boolean_expr.lhs = lhs;
+    new_bool_expr_node->boolean_expr.rhs = rhs;
+
+    *node_ptr_out = new_bool_expr_node;
+    ParseState_Apply(state, &save);
+
+    return Error_Good;
+}
+
+Error Node_ParseStatementList(ParseState *state, Node **node_ptr_out);
+
+// Error_UnknownToken
+// Error_ParseFailed
+// Error_Alloc
+Error Node_ParseIfBlock(ParseState *state, Node **node_ptr_out) {
+    Error err;
+    ParseState save = ParseState_Save(state);
+
+    Node *boolean_expr = NULL;
+    Node *first_statement = NULL;
+
+    // parse the if token
+    err = Node_ParseToken(&save, Token_If, NULL);
+    BUBBLE(Error_UnknownToken);
+    if (err == Error_UnexpectedToken)
+        return Error_ParseFailed;
+    NOFAIL(err);
+
+    // parse the condition
+    err = Node_ParseBooleanExpr(&save, &boolean_expr);
+    BUBBLE(Error_UnknownToken);
+    BUBBLE(Error_ParseFailed);
+    BUBBLE(Error_Alloc);
+    NOFAIL(err);
+
+    // parse the opening bracket
+    err = Node_ParseToken(&save, Token_OpenBracket, NULL);
+    BUBBLE(Error_UnknownToken);
+    if (err == Error_UnexpectedToken)
+        return Error_ParseFailed;
+    NOFAIL(err);
+
+    // parse the inside of the statement block.
+    err = Node_ParseStatementList(&save, &first_statement);
+    BUBBLE(Error_UnknownToken);
+    BUBBLE(Error_ParseFailed);
+    BUBBLE(Error_Alloc);
+    NOFAIL(err);
+
+    // parse the trailing close bracket.
+    err = Node_ParseToken(&save, Token_CloseBracket, NULL);
+    BUBBLE(Error_UnknownToken);
+    if (err == Error_UnexpectedToken)
+        return Error_ParseFailed;
+    NOFAIL(err);
+
+    // now that we are done, check to make sure that the nodes were actually created.
+    ASSERT(boolean_expr != NULL && first_statement != NULL);
+
+    // now create the node on the stack
+    Node *new_if_block = NULL;
+    err = SaveStack_Push(&save.stack, (void **)&new_if_block);
+    BUBBLE(Error_Alloc);
+    NOFAIL(err);
+
+    // initialize the node
+    new_if_block->node_type = Node_IfBlock;
+    new_if_block->if_block.boolean_expr = boolean_expr;
+    new_if_block->if_block.first_statement = first_statement;
+
+    *node_ptr_out = new_if_block;
+    ParseState_Apply(state, &save);
+
+    return Error_Good;
+}
+
+Error Node_ParseStatementList(ParseState *state, Node **node_ptr_out) {
+    Error err;
+    ParseState save = ParseState_Save(state);
+
+    Node *first_statement = NULL;
+    Node *next_statement = NULL;
+
+    do {
+        err = Node_ParseVariableDecl(&save, &first_statement);
+        BUBBLE(Error_UnknownToken);
+        BUBBLE(Error_Alloc);
+        if (err == Error_ParseFailed) {
+            // try parsing if block instead.
+            err = Node_ParseIfBlock(&save, &first_statement);
+            if (err == Error_ParseFailed) {
+                if (first_statement == NULL) {
+                    // haven't even parsed a single statement.
+                    return Error_ParseFailed;
+                } else {
+                    // have parsed at least one statement.
+                    break;
+                }
+            }
+            BUBBLE(Error_UnknownToken);
+            BUBBLE(Error_Alloc);
+            NOFAIL(err);
+
+        } else {
+            NOFAIL(err);
+        }
+    } while (true);
+
+    // now that we are done, check to make sure that the nodes were actually created.
+    ASSERT(first_statement != NULL);
+
+    // now create the node on the stack
+    Node *new_if_block = NULL;
+    err = SaveStack_Push(&save.stack, (void **)&new_if_block);
+    BUBBLE(Error_Alloc);
+    NOFAIL(err);
+
+    // initialize the node
+    new_if_block->node_type = Node_IfBlock;
+    new_if_block->if_block.boolean_expr = boolean_expr;
+    new_if_block->if_block.first_statement = first_statement;
+
+    *node_ptr_out = new_if_block;
     ParseState_Apply(state, &save);
 
     return Error_Good;

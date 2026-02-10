@@ -4,8 +4,7 @@
 
 typedef struct StackBlock StackBlock;
 
-typedef struct Stack
-{
+typedef struct Stack {
     StackBlock *stack_block;
     StackBlock *last_block_with_items;
     UInt stack_size;
@@ -21,8 +20,7 @@ Error Stack_Peek(Stack *in, void **ptr_out, UInt index_from_top);
 // Error_NothingToPop
 Error Stack_Pop(Stack *stack, void *out);
 
-typedef struct SaveStack
-{
+typedef struct SaveStack {
     void *internal;
 } SaveStack;
 
@@ -31,6 +29,7 @@ typedef UInt SaveStackSaveState;
 
 // Error_Alloc
 Error SaveStack_Init(SaveStack *in, UInt bytes_per_item);
+
 // Error_Alloc
 Error SaveStack_Push(SaveStack *in, void **ptr_out);
 
