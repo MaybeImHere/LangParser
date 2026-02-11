@@ -22,8 +22,10 @@ typedef struct VariableExprAtom {
     Node *value_or_variable_expr;
 } VariableExprAtom;
 
+typedef enum VariableExprType { Expr_Add, Expr_Sub, Expr_Mul, Expr_SingleAtom } VariableExprType;
+
 typedef struct VariableExpr {
-    enum VariableExprType { Expr_Add, Expr_Sub, Expr_Mul, Expr_SingleAtom } type;
+    VariableExprType type;
 
     Node *lhs;
     Node *rhs;
