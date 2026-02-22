@@ -39,6 +39,7 @@ Error String_FromFile(String *out, byte **data, const char *filename) {
                 *data = buf;
                 out->data = buf;
                 out->length = current_length;
+                fclose(file_handle);
                 return Error_Good;
             } else if (ferror(file_handle)) {
                 // there was an error, so just free the buffer and return.

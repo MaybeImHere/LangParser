@@ -1,2 +1,6 @@
 *.o
 /compiled/
+/test/build/
+/build/
+/compiled/
+/.vscode/
