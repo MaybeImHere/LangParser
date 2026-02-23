@@ -61,7 +61,7 @@ Error String_FromFile(String *out, byte **data, const char *filename) {
     }
 }
 
-String StringFromLiteral(const char *literal) {
+String String_FromLiteral(const char *literal) {
     String ret = {.data = (const byte *)literal, .length = strlen(literal)};
 
     return ret;

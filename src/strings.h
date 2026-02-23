@@ -15,7 +15,7 @@ typedef struct String {
 Error String_FromFile(String *out, byte **data, const char *filename);
 
 // Converts a literal into a String.
-String StringFromLiteral(const char *literal);
+String String_FromLiteral(const char *literal);
 
 // Creates a String from an array of bytes.
 String String_Create(const byte *src, UInt length);

@@ -683,8 +683,8 @@ int main(void) {
         return 1;
     }
 
-    String a = StringFromLiteral("a");
-    String b = StringFromLiteral("b");
+    String a = String_FromLiteral("a");
+    String b = String_FromLiteral("b");
 
     StateMachine_AppendInstruction(&sm, end_state, SInstr_Assign, a, b);
     StateMachine_AppendInstruction(&sm, end_state, SInstr_Assign, b, b);

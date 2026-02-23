@@ -25,9 +25,9 @@ int main() {
     Error err = Map_Init(&map, sizeof(KeyValue), KeyValue_Hash, KeyValue_Eq);
     NOFAIL("Map_Init");
 
-    KeyValue kv1 = {.key = StringFromLiteral("hello"), .value = 8};
-    KeyValue kv2 = {.key = StringFromLiteral("world"), .value = 7};
-    KeyValue kv3 = {.key = StringFromLiteral("hello"), .value = 6};
+    KeyValue kv1 = {.key = String_FromLiteral("hello"), .value = 8};
+    KeyValue kv2 = {.key = String_FromLiteral("world"), .value = 7};
+    KeyValue kv3 = {.key = String_FromLiteral("hello"), .value = 6};
 
     err = Map_CreateIfNotExists(&map, &kv1);
     if (err == Error_Alloc) {

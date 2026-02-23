@@ -4,7 +4,7 @@
 #include <stdlib.h>
 
 void TestParsing(const char *test_name, const char *to_parse, const char *expected) {
-    String test_string = StringFromLiteral(to_parse);
+    String test_string = String_FromLiteral(to_parse);
 
     ParseState ps;
     Error err = ParseState_Init(&ps, &test_string);
@@ -58,7 +58,7 @@ void TestParsing(const char *test_name, const char *to_parse, const char *expect
 }
 
 void ShouldFail(const char *test_name, const char *to_parse, Error expected_error) {
-    String test_string = StringFromLiteral(to_parse);
+    String test_string = String_FromLiteral(to_parse);
 
     ParseState ps;
     Error err = ParseState_Init(&ps, &test_string);
@@ -75,7 +75,7 @@ void ShouldFail(const char *test_name, const char *to_parse, Error expected_erro
 }
 
 void PrintOutput(const char *test_name, const char *to_parse) {
-    String test_string = StringFromLiteral(to_parse);
+    String test_string = String_FromLiteral(to_parse);
 
     ParseState ps;
     Error err = ParseState_Init(&ps, &test_string);

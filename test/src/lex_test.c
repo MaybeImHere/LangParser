@@ -4,7 +4,7 @@
 #include <stdlib.h>
 
 int main() {
-    String test_string = StringFromLiteral("123  hello    +- * ( ) { } = / ;   if  else ");
+    String test_string = String_FromLiteral("123  hello    +- * ( ) { } = / ;   if  else ");
     TokenType expected[] = {
         Token_Integer,
         Token_Identifier,
@@ -54,7 +54,7 @@ int main() {
     }
 
     // now, make sure it can error gracefully.
-    String es = StringFromLiteral("%~`");
+    String es = String_FromLiteral("%~`");
     StringStream_Init(&ss, &es);
 
     Token token;
