@@ -7,21 +7,30 @@ typedef enum TokenType {
     Token_Integer,
     Token_Identifier,
 
-    Token_Plus,
-    Token_Minus,
-    Token_Asterisk,
-    Token_OpenParen,
-    Token_CloseParen,
-    Token_OpenBracket,
-    Token_CloseBracket,
-    Token_Eq,
-    Token_Division,
-    Token_Semicolon,
+    Token_Plus,           // +
+    Token_Minus,          // -
+    Token_Asterisk,       // *
+    Token_OpenParen,      // (
+    Token_CloseParen,     // )
+    Token_OpenBracket,    // {
+    Token_CloseBracket,   // }
+    Token_Eq,             // =
+    Token_Division,       // /
+    Token_Semicolon,      // ;
+    Token_GreaterThan,    // >
+    Token_LessThan,       // <
+    Token_GreaterOrEqual, // >=
+    Token_LessOrEqual,    // <=
+    Token_EqualBool,      // ==
+    Token_NotEqual,       // !=
+
     Token_Eof,
 
     // keywords
     Token_If,
     Token_Else,
+    Token_And,
+    Token_Or,
 } TokenType;
 
 typedef struct Token {

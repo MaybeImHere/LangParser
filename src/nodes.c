@@ -198,57 +198,6 @@ static Node *ParseState_GetNodePtrArrIdx(ParseState *p, ArrayIndex index) {
     return DynamicArray_GetPtr(&p->node_array, index);
 }
 
-// Converts a child from an index type to a pointer type.
-static void ParseState_ConvertChild(ParseState *p, Child *child_member) {
-    child_member->next_ptr = ParseState_GetNodePtr(p, *child_member);
-}
-
-static bool Expr_IsOneArgOp(ExprOp op) { return op == ExprOp_Negate || op == ExprOp_LoneAtom; }
-static bool Expr_IsTwoArgOp(ExprOp op) {
-    return op == ExprOp_Add || op == ExprOp_Sub || op == ExprOp_Mul || op == ExprOp_Div;
-}
-
-// Converts node indices witin all nodes into pointers. Returns Error_Internal if an unrecognized
-// node is found.
-static Error ParseState_ConvertIndicesToPtrs(ParseState *p) {
-    for (ArrayIndex node_idx = 0; node_idx < DynamicArray_Length(&p->node_array); node_idx++) {
-        // first get the node we want to convert.
-        Node *node_ptr = ParseState_GetNodePtrArrIdx(p, node_idx);
-        NodeType t = node_ptr->node_type;
-
-        // these don't have children to convert, so skip them.
-        if (t == Node_Integer || t == Node_Identifier)
-            continue;
-
-        if (t == Node_Value) {
-            ParseState_ConvertChild(p, &node_ptr->value.identifier_or_integer);
-        } else if (t == Node_ExprAtom) {
-            if (node_ptr->expr_atom.atom_type == ExprAtom_Paren) {
-                ParseState_ConvertChild(p, &node_ptr->expr_atom.parenthesized_expr);
-            } else if (node_ptr->expr_atom.atom_type == ExprAtom_Value) {
-                ParseState_ConvertChild(p, &node_ptr->expr_atom.value);
-            } else {
-                return Error_Internal;
-            }
-        } else if (t == Node_Expr) {
-            ExprOp op = node_ptr->expr.op_type;
-            if (Expr_IsOneArgOp(op)) {
-                ParseState_ConvertChild(p, &node_ptr->expr.one_arg_op.atom);
-            } else if (Expr_IsTwoArgOp(op)) {
-                ParseState_ConvertChild(p, &node_ptr->expr.two_arg_op.lhs);
-                ParseState_ConvertChild(p, &node_ptr->expr.two_arg_op.rhs);
-            } else {
-                return Error_Internal;
-            }
-        } else if (t == Node_Program) {
-            ParseState_ConvertChild(p, &node_ptr->program_node.variable_decl);
-        } else {
-            return Error_Internal;
-        }
-    }
-    return Error_Good;
-}
-
 // Parses an integer and creates an integer node.
 static bool PSS_ParseInteger(ParseStateSave *p, Child *node_idx_out) {
     PARSE_INIT;
@@ -296,7 +245,7 @@ static bool PSS_ParseValue(ParseStateSave *p, Child *node_idx_out) {
     TRY_PARSE_GOTO(PSS_ParseIdentifier(&save, &value.identifier_or_integer), value_child_parsed);
 
     // both failed
-    PARSE_RET_ERROR_EX(Error_ParseFailed);
+    PARSE_RET_ERROR;
 
     // parsing successful, now create the node.
 value_child_parsed:;
@@ -319,30 +268,28 @@ static bool PSS_ParseExprAtom(ParseStateSave *p, Child *node_idx_out) {
         .parenthesized_expr.next_idx = ARRAYINDEX_INVALID,
     };
 
-    // first try parsing a parenthesized expression
-    TRY_PARSE_GOTO(PSS_ParseToken(&save, Token_OpenParen, NULL), parenthesized_expr);
+    if (PSS_ParseToken(&save, Token_OpenParen, NULL)) {
+        // parsing a parenthesized expression
+        // set the type and parse an expression.
+        expr_atom.atom_type = ExprAtom_Paren;
+        MUST_PARSE(PSS_ParseExpr(&save, &expr_atom.parenthesized_expr));
 
-    // wasn't a parenthesized expression, so it must be a value.
-    TRY_PARSE_GOTO(PSS_ParseValue(&save, &expr_atom.value), value_expr);
+        // now parse the closing parenthesis expression.
+        MUST_PARSE(PSS_ParseToken(&save, Token_CloseParen, NULL));
+    } else {
+        CHECK_RECOVERY;
 
-// parsing a parethesized expression
-parenthesized_expr:;
-    // set the type and parse an expression.
-    expr_atom.atom_type = ExprAtom_Paren;
-    MUST_PARSE(PSS_ParseExpr(&save, &expr_atom.parenthesized_expr));
+        // not a parenthesized atom, so just try parsing a value instead
+        if (PSS_ParseValue(&save, &expr_atom.value)) {
+            expr_atom.atom_type = ExprAtom_Value;
+            // since we already parsed the actual value in the if condition, we don't have to worry
+            // about parsing it here.
+        } else {
+            // wasn't a value or a parenthesized expression, so just an invalid atom.
+            PARSE_RET_ERROR;
+        }
+    }
 
-    // now parse the closing parenthesis expression.
-    MUST_PARSE(PSS_ParseToken(&save, Token_CloseParen, NULL));
-    goto create_node;
-
-// parsing a value
-value_expr:;
-    expr_atom.atom_type = ExprAtom_Value;
-    // already parsed the value so just continue.
-    goto create_node;
-
-// now create the node.
-create_node:;
     // now actually allocate the node.
     Node node = {
         .node_type = Node_ExprAtom,
@@ -360,6 +307,62 @@ create_node:;
         *op_type = _op_type;                                                                       \
         PARSE_RET_GOOD;                                                                            \
     }
+
+// Parsing negations
+static bool PSS_ParseExpr1(ParseStateSave *p, Child *node_idx_out, ExprOpPrecedence precedence) {
+    PARSE_INIT;
+
+    Expr expr = {.op_type = ExprOp_Invalid};
+
+    if (precedence == ExprOpPrec_Negation) {
+        // see if it's a negation expression.
+        if (PSS_ParseToken(&save, Token_Minus, NULL)) {
+            // set the type of operation.
+            expr.op_type = ExprOp_Negate;
+            // now parse the expression atom that is being negated.
+            MUST_PARSE(PSS_ParseExprAtom(&save, &expr.one_arg_op.atom));
+
+            Node expr_node = {.node_type = Node_Expr, .expr = expr};
+            MUST_PARSE(PSS_CreateNode(&save, &expr_node, node_idx_out));
+
+            PARSE_RET_GOOD;
+        } else {
+            CHECK_RECOVERY;
+            // not negation, so must be a lone atom.
+        }
+    } else if (precedence == ExprOpPrec_MulDiv) {
+        if (!PSS_ParseExpr1(&save, expr.two_arg_op))
+    }
+
+    PARSE_RET_ERROR;
+}
+
+static bool PSS_ParseExpr2Atom(ParseStateSave *p, Child *node_idx_out) {
+    PARSE_INIT;
+
+    if (PSS_ParseExpr1(&save, node_idx_out))
+        PARSE_RET_GOOD;
+    CHECK_RECOVERY;
+
+    if (PSS_ParseExprAtom(&save, node_idx_out))
+        PARSE_RET_GOOD;
+
+    PARSE_RET_ERROR;
+}
+
+// Parsing multiplication and division.
+static bool PSS_ParseExpr2(ParseStateSave *p, Child *node_idx_out) {
+    PARSE_INIT;
+
+    Expr expr = {.op_type = ExprOp_Invalid};
+
+    if (PSS_ParseExpr1(&save, &expr.two_arg_op.lhs)) {
+        if (PSS_ParseExpr1(&save, &expr.two_arg_op.rhs)) {
+        }
+    }
+
+    PARSE_RET_ERROR;
+}
 
 // This function tries to figure out which expression op type is the current expression, assuming
 // the first expression atom has already been parsed. Basically, is it a plus, minus, times, etc.
@@ -385,10 +388,70 @@ static bool PSS_ParseExprBinaryOperator(ParseStateSave *p, ExprOp *op_type) {
         SET_OP_TYPE_AND_RETURN(ExprOp_Div);
     CHECK_RECOVERY;
 
+    if (PSS_ParseToken(&save, Token_GreaterThan, NULL))
+        SET_OP_TYPE_AND_RETURN(ExprOp_GreaterThan);
+    CHECK_RECOVERY;
+
+    if (PSS_ParseToken(&save, Token_LessThan, NULL))
+        SET_OP_TYPE_AND_RETURN(ExprOp_LessThan);
+    CHECK_RECOVERY;
+
+    if (PSS_ParseToken(&save, Token_GreaterOrEqual, NULL))
+        SET_OP_TYPE_AND_RETURN(ExprOp_GreaterOrEqual);
+    CHECK_RECOVERY;
+
+    if (PSS_ParseToken(&save, Token_LessOrEqual, NULL))
+        SET_OP_TYPE_AND_RETURN(ExprOp_LessOrEqual);
+    CHECK_RECOVERY;
+
+    if (PSS_ParseToken(&save, Token_EqualBool, NULL))
+        SET_OP_TYPE_AND_RETURN(ExprOp_IsEqual);
+    CHECK_RECOVERY;
+
+    if (PSS_ParseToken(&save, Token_NotEqual, NULL))
+        SET_OP_TYPE_AND_RETURN(ExprOp_IsNotEqual);
+    CHECK_RECOVERY;
+
     // None of these suceeded, but we can still recover, so it's a lone value.
     SET_OP_TYPE_AND_RETURN(ExprOp_LoneAtom);
 }
 #undef SET_OP_TYPE_AND_RETURN
+
+static bool PSS_ParseNegationExpr(ParseStateSave *p, Child *node_idx_out) {
+    PARSE_INIT;
+
+    Expr expr = {.op_type = ExprOp_Invalid};
+
+    // first see if it's a negation expression.
+    if (PSS_ParseToken(&save, Token_Minus, NULL)) {
+        // first set the type of operation.
+        expr.op_type = ExprOp_Negate;
+        // now parse the expression atom that is being negated.
+        MUST_PARSE(PSS_ParseExprAtom(&save, &expr.one_arg_op.atom));
+
+        Node expr_node = {.node_type = Node_Expr, .expr = expr};
+        MUST_PARSE(PSS_CreateNode(&save, &expr_node, node_idx_out));
+
+        PARSE_RET_GOOD;
+    }
+    PARSE_RET_ERROR;
+}
+
+static bool PSS_ParseMulDivExpr(ParseStateSave *p, Child *node_idx_out) {
+    PARSE_INIT;
+
+    Expr expr = {.op_type = ExprOp_Invalid};
+
+    MUST_PARSE(PSS_ParseExprAtom(&save, &expr.two_arg_op.lhs));
+
+    if (PSS_ParseToken(&save, Token_Asterisk, NULL)) {
+
+    } else {
+        CHECK_RECOVERY;
+    }
+
+    PARSE_RET_GOOD;
+}
 
 static bool PSS_ParseExpr(ParseStateSave *p, Child *node_idx_out) {
     PARSE_INIT;
@@ -401,6 +464,10 @@ static bool PSS_ParseExpr(ParseStateSave *p, Child *node_idx_out) {
         expr.op_type = ExprOp_Negate;
         // now parse the expression atom that is being negated.
         MUST_PARSE(PSS_ParseExprAtom(&save, &expr.one_arg_op.atom));
+
+        Node expr_node = {.node_type = Node_Expr, .expr = expr};
+        MUST_PARSE(PSS_CreateNode(&save, &expr_node, node_idx_out));
+
     } else {
         CHECK_RECOVERY;
 
@@ -413,6 +480,7 @@ static bool PSS_ParseExpr(ParseStateSave *p, Child *node_idx_out) {
         MUST_PARSE(PSS_ParseExprBinaryOperator(&save, &op_type));
         expr.op_type = op_type;
 
+        // check to see whether it's a binary op, or a unary op. set the children accordingly.
         if (op_type != ExprOp_LoneAtom) {
             // binary op, so we have to parse a second atom.
             expr.two_arg_op.lhs = first_atom;
@@ -430,12 +498,96 @@ static bool PSS_ParseExpr(ParseStateSave *p, Child *node_idx_out) {
     PARSE_RET_GOOD;
 }
 
+static bool PSS_ParseSetVariable(ParseStateSave *p, Child *node_idx_out) {
+    PARSE_INIT;
+
+    SetVariable var;
+
+    MUST_PARSE(PSS_ParseToken(&save, Token_Identifier, &var.variable_name));
+    MUST_PARSE(PSS_ParseToken(&save, Token_Eq, NULL));
+    MUST_PARSE(PSS_ParseExpr(&save, &var.variable_value_expr));
+
+    Node node = {.node_type = Node_SetVariable, .set_variable = var};
+    MUST_PARSE(PSS_CreateNode(&save, &node, node_idx_out));
+    PARSE_RET_GOOD;
+}
+
+static bool PSS_ParseStmt(ParseStateSave *p, Child *node_idx_out);
+static bool PSS_ParseIfStmt(ParseStateSave *p, Child *node_idx_out) {
+    PARSE_INIT;
+
+    IfStmt if_stmt;
+
+    MUST_PARSE(PSS_ParseToken(&save, Token_If, NULL));
+    MUST_PARSE(PSS_ParseExpr(&save, &if_stmt.condition));
+    MUST_PARSE(PSS_ParseToken(&save, Token_OpenBracket, NULL));
+    MUST_PARSE(PSS_ParseStmt(&save, &if_stmt.first_stmt));
+    MUST_PARSE(PSS_ParseToken(&save, Token_CloseBracket, NULL));
+
+    Node node = {.node_type = Node_IfStmt, .if_stmt = if_stmt};
+    MUST_PARSE(PSS_CreateNode(&save, &node, node_idx_out));
+    PARSE_RET_GOOD;
+}
+
+static bool PSS_ParseOneStmt(ParseStateSave *p, Child *node_idx_out) {
+    PARSE_INIT;
+
+    Stmt stmt = {.has_next_stmt = false, .type = Stmt_Invalid};
+
+    if (PSS_ParseSetVariable(&save, &stmt.set_variable)) {
+        stmt.type = Stmt_Assign;
+        goto create_node;
+    }
+
+    PARSE_RET_ERROR;
+create_node:;
+    Node node = {.node_type = Node_Stmt, .stmt = stmt};
+    MUST_PARSE(PSS_CreateNode(&save, &node, node_idx_out));
+    PARSE_RET_GOOD;
+}
+
+static bool PSS_ParseStmt(ParseStateSave *p, Child *node_idx_out) {
+    PARSE_INIT;
+
+    Child first_stmt;
+
+    // we parse the first required statement.
+    MUST_PARSE(PSS_ParseOneStmt(&save, &first_stmt));
+
+    // we set the output to the first statement in the statement chain.
+    *node_idx_out = first_stmt;
+
+    // now keep parsing statements until we reach an error.
+    Node *cur_node = NULL;
+    Child new_stmt = first_stmt;
+    while (true) {
+        // get a pointer to the previous node.
+        cur_node = ParseState_GetNodePtr(save.p, new_stmt);
+
+        // try and parse a new statement node.
+        if (!PSS_ParseOneStmt(&save, &new_stmt)) {
+            CHECK_RECOVERY;
+
+            // it failed, so we are done.
+            cur_node->stmt.has_next_stmt = false;
+            PARSE_RET_GOOD;
+
+        } else {
+            // it didn't fail, so we have to continue.
+            cur_node->stmt.has_next_stmt = true;
+            cur_node->stmt.next_stmt = new_stmt;
+        }
+    }
+
+    PARSE_RET_ERROR;
+}
+
 static Error PSS_ParseProgram(ParseStateSave *p, Child *node_idx_out) {
     PARSE_INIT;
 
     // parse the node data
     Child idx;
-    if (!PSS_ParseExpr(&save, &idx))
+    if (!PSS_ParseIfStmt(&save, &idx))
         PARSE_RET_ERROR;
 
     // create the node
@@ -445,6 +597,77 @@ static Error PSS_ParseProgram(ParseStateSave *p, Child *node_idx_out) {
         PARSE_RET_ERROR;
 
     PARSE_RET_GOOD;
+}
+
+// Converts a child from an index type to a pointer type.
+static void ParseState_ConvertChild(ParseState *p, Child *child_member) {
+    child_member->next_ptr = ParseState_GetNodePtr(p, *child_member);
+}
+
+static bool Expr_IsOneArgOp(ExprOp op) { return op == ExprOp_Negate || op == ExprOp_LoneAtom; }
+static bool Expr_IsTwoArgOp(ExprOp op) {
+    return op == ExprOp_Add || op == ExprOp_Sub || op == ExprOp_Mul || op == ExprOp_Div ||
+           op == ExprOp_GreaterThan || op == ExprOp_LessThan || op == ExprOp_GreaterOrEqual ||
+           op == ExprOp_LessOrEqual || op == ExprOp_IsEqual || op == ExprOp_IsNotEqual;
+}
+
+// Converts node indices witin all nodes into pointers. Returns Error_Internal if an unrecognized
+// node is found.
+static Error ParseState_ConvertIndicesToPtrs(ParseState *p) {
+    for (ArrayIndex node_idx = 0; node_idx < DynamicArray_Length(&p->node_array); node_idx++) {
+        // first get the node we want to convert.
+        Node *node_ptr = ParseState_GetNodePtrArrIdx(p, node_idx);
+        NodeType t = node_ptr->node_type;
+
+        // these don't have children to convert, so skip them.
+        if (t == Node_Integer || t == Node_Identifier)
+            continue;
+
+        // all of these nodes need some conversion. we handle everything in this if chain.
+        if (t == Node_Value) {
+            ParseState_ConvertChild(p, &node_ptr->value.identifier_or_integer);
+        } else if (t == Node_ExprAtom) {
+            if (node_ptr->expr_atom.atom_type == ExprAtom_Paren) {
+                ParseState_ConvertChild(p, &node_ptr->expr_atom.parenthesized_expr);
+            } else if (node_ptr->expr_atom.atom_type == ExprAtom_Value) {
+                ParseState_ConvertChild(p, &node_ptr->expr_atom.value);
+            } else {
+                return Error_Internal;
+            }
+        } else if (t == Node_Expr) {
+            ExprOp op = node_ptr->expr.op_type;
+            if (Expr_IsOneArgOp(op)) {
+                ParseState_ConvertChild(p, &node_ptr->expr.one_arg_op.atom);
+            } else if (Expr_IsTwoArgOp(op)) {
+                ParseState_ConvertChild(p, &node_ptr->expr.two_arg_op.lhs);
+                ParseState_ConvertChild(p, &node_ptr->expr.two_arg_op.rhs);
+            } else {
+                return Error_Internal;
+            }
+        } else if (t == Node_SetVariable) {
+            ParseState_ConvertChild(p, &node_ptr->set_variable.variable_value_expr);
+        } else if (t == Node_IfStmt) {
+            ParseState_ConvertChild(p, &node_ptr->if_stmt.condition);
+            ParseState_ConvertChild(p, &node_ptr->if_stmt.first_stmt);
+        } else if (t == Node_Stmt) {
+            // first convert this statement's children.
+            if (node_ptr->stmt.type == Stmt_Assign) {
+                ParseState_ConvertChild(p, &node_ptr->stmt.set_variable);
+            } else {
+                return Error_Internal;
+            }
+
+            // now convert the pointer to the next statement.
+            if (node_ptr->stmt.has_next_stmt) {
+                ParseState_ConvertChild(p, &node_ptr->stmt.next_stmt);
+            }
+        } else if (t == Node_Program) {
+            ParseState_ConvertChild(p, &node_ptr->program_node.variable_decl);
+        } else {
+            return Error_Internal;
+        }
+    }
+    return Error_Good;
 }
 
 Error ParseState_ParseProgram(ParseState *p, Node **node_ptr_out) {
@@ -562,8 +785,63 @@ static Error Child_Print(DynamicString *out, Child child_node) {
             PRINT_NODE(node->expr.one_arg_op.atom);
         } else if (node->expr.op_type == ExprOp_LoneAtom) {
             PRINT_NODE(node->expr.one_arg_op.atom);
+        } else if (node->expr.op_type == ExprOp_GreaterThan) {
+            PRINT_NODE(node->expr.two_arg_op.lhs);
+            PRINT_CONST_STR(" > ");
+            PRINT_NODE(node->expr.two_arg_op.rhs);
+        } else if (node->expr.op_type == ExprOp_LessThan) {
+            PRINT_NODE(node->expr.two_arg_op.lhs);
+            PRINT_CONST_STR(" < ");
+            PRINT_NODE(node->expr.two_arg_op.rhs);
+        } else if (node->expr.op_type == ExprOp_GreaterOrEqual) {
+            PRINT_NODE(node->expr.two_arg_op.lhs);
+            PRINT_CONST_STR(" >= ");
+            PRINT_NODE(node->expr.two_arg_op.rhs);
+        } else if (node->expr.op_type == ExprOp_LessOrEqual) {
+            PRINT_NODE(node->expr.two_arg_op.lhs);
+            PRINT_CONST_STR(" <= ");
+            PRINT_NODE(node->expr.two_arg_op.rhs);
+        } else if (node->expr.op_type == ExprOp_IsEqual) {
+            PRINT_NODE(node->expr.two_arg_op.lhs);
+            PRINT_CONST_STR(" == ");
+            PRINT_NODE(node->expr.two_arg_op.rhs);
+        } else if (node->expr.op_type == ExprOp_IsNotEqual) {
+            PRINT_NODE(node->expr.two_arg_op.lhs);
+            PRINT_CONST_STR(" != ");
+            PRINT_NODE(node->expr.two_arg_op.rhs);
+        } else {
+            return Error_Internal;
         }
         break;
+
+    case Node_SetVariable:
+        PRINT_STRING(node->set_variable.variable_name);
+        PRINT_CONST_STR(" = ");
+        PRINT_NODE(node->set_variable.variable_value_expr);
+        break;
+    case Node_IfStmt:
+        PRINT_CONST_STR("if ");
+        PRINT_NODE(node->if_stmt.condition);
+        PRINT_CONST_STR(" {\n");
+        PRINT_NODE(node->if_stmt.first_stmt);
+        PRINT_CONST_STR("}");
+        break;
+
+    case Node_Stmt:
+        if (node->stmt.type == Stmt_Assign) {
+            PRINT_NODE(node->stmt.set_variable);
+        } else {
+            return Error_Internal;
+        }
+
+        PRINT_CONST_STR("\n");
+
+        if (node->stmt.has_next_stmt) {
+            PRINT_NODE(node->stmt.next_stmt);
+        }
+
+        break;
+
     case Node_Program:
         PRINT_NODE(node->program_node.variable_decl);
         break;

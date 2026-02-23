@@ -1,0 +1,13 @@
+# LangParser
+A while ago, I realized that the ternary operator, ? :, could theoretically replace all if statements in a C program. I thought it would be interesting to see what a program like this actually would look like, so here, I'm writing a transpiler for a programming language that will eventually output C with only these ternary operators.
+
+Currently, I use nodes_test.c as the testing ground, since nodes.c is what I'm working on. That means, within the Makefile, I only have defined nodes_test. To run it, just run `make test_nodes`.
+
+
+How to add a new node to `nodes.c/nodes.h`:
+1. Define a new node type within the `NodeType` enum. For example, you might add `Node_SetVariable` into the enum.
+2. Define the struct for that node type. For example, for `Node_SetVariable`, you could define a struct called `SetVariable`, with 2 members, `String variable_name`, and `Child variable_value_expr`. The first is for the name of the variable being set, and the second is for the expression that the variable will be set to.
+3. Add this struct to the `Node` struct's union.
+4. Define a function for parsing the node, with the convention `static bool PSS_Parse<Node type being parsed>(ParseStateSave* p, Child* node_idx_out) { ... }`. Note that the name `p` is important to keep, as several macros hardcode that name within them.
+5. Within some structures, child nodes are kept as a union between an array index and a pointer. They are kept as an array index while parsing, and are converted to a pointer when parsing is finished. This conversion step, where indices are converted to pointers, currently needs to be hard coded and implemented for every node type. To do so, add to the function `static Error ParseState_ConvertIndicesToPtrs(ParseState* p) { ... }`. Within this function, there is a large if statement with several `else if` chained together. Add the new node type within this chain, making sure to respect the order, as compared with the `NodeType` enum's order. For example, `Node_Program` should always be the last node in `NodeType`, and thus, should always be the last node type checked within the if chain.
+6. To enable the parse tree to be printed back out, the node should also be converted to a string within `static Error Child_Print(DynamicString *out, Child child_node)`. In this function, extend the switch block with the new node type, making sure to preserve the same node type ordering found in the `enum NodeType` definition.

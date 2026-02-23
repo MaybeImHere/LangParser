@@ -57,13 +57,35 @@ void TestParsing(const char *test_name, const char *to_parse, const char *expect
     printf("[PASSED] %s\n", test_name);
 }
 
+void ShouldFail(const char *test_name, const char *to_parse, Error expected_error) {
+    String test_string = StringFromLiteral(to_parse);
+
+    ParseState ps;
+    Error err = ParseState_Init(&ps, &test_string);
+    NOFAIL("initialization of parser failed");
+
+    Node *node_ptr = NULL;
+    err = ParseState_ParseProgram(&ps, &node_ptr);
+    if (err != expected_error) {
+        ERROR("expected a different error");
+    }
+
+    ParseState_Free(&ps);
+    printf("[PASSED] %s\n", test_name);
+}
+
 int main() {
-    TestParsing("addition test", "abc   +   123", "abc + 123");
-    TestParsing("subtraction test", "abc   -   123", "abc - 123");
-    TestParsing("multiplication test", "abc   *   123", "abc * 123");
-    TestParsing("division test", "abc   /   123", "abc / 123");
-    TestParsing("negation test", "-   123", "-123");
-    TestParsing("lone atom test", "123", "123");
-    TestParsing("parenthesis test", "123 + ((a * 3) - 4)", "123 + ((a * 3) - 4)");
+    /*
+    TestParsing("statement test 1", "a = abc   +   123\nb = 123\nc = happy\nd = a != b",
+                "a = abc + 123\nb = 123\nc = happy\nd = a != b\n");
+
+    ShouldFail("no equal symbol", "a + b - c", Error_ParseFailed);
+    ShouldFail("invalid expression", "a = -", Error_ParseFailed);
+    ShouldFail("nothing after equals sign", "a=", Error_ParseFailed);
+    */
+
+    TestParsing("if test 1", "if a == b { a = b\n b = 10*c\n d=(-a + b) - (c * ((-3*d)+1))}",
+                "if a == b {\na = b\nb = 10 * c\nd = (-a + b) - (c * ((-3*d)+1))\n}");
+
     return 0;
 }

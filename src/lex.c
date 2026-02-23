@@ -13,11 +13,12 @@ Token Token_Create(TokenType token_type, const byte *data, UInt length) {
     return ret;
 }
 
-static const char *token_map[] = {"Token_Integer",    "Token_Identifier",  "Token_Plus",
-                                  "Token_Minus",      "Token_Asterisk",    "Token_OpenParen",
-                                  "Token_CloseParen", "Token_OpenBracket", "Token_CloseBracket",
-                                  "Token_Eq",         "Token_Division",    "Token_Semicolon",
-                                  "Token_Eof",        "Token_If",          "Token_Else"};
+static const char *token_map[] = {
+    "Token_Integer",      "Token_Identifier", "Token_Plus",       "Token_Minus",
+    "Token_Asterisk",     "Token_OpenParen",  "Token_CloseParen", "Token_OpenBracket",
+    "Token_CloseBracket", "Token_Eq",         "Token_Division",   "Token_Semicolon",
+    "Token_Eof",          "Token_If",         "Token_Else",
+};
 
 void Token_Print(const Token *token) {
     printf("%s '", token_map[token->token_type]);
@@ -50,10 +51,13 @@ static void Token_ParseWhile(StringStream *character_stream, bool (*parse_func)(
     }
 }
 
-// If the byte b is a single character token, the token type for it is placed in out, and true is
-// returned. Otherwise, returns false.
-static bool Token_GetSingleByteToken(byte b, TokenType *out) {
-    switch (b) {
+static bool Token_ParseOperators(StringStream *s, UInt *valid_chars, byte cur_byte,
+                                 TokenType *out) {
+    UInt valid_chars_original = *valid_chars;
+    (*valid_chars)++;
+    byte next_byte = 0;
+
+    switch (cur_byte) {
     case '+':
         *out = Token_Plus;
         return true;
@@ -69,9 +73,19 @@ static bool Token_GetSingleByteToken(byte b, TokenType *out) {
     case ')':
         *out = Token_CloseParen;
         return true;
-    case '=':
-        *out = Token_Eq;
-        return true;
+    case '=':;
+        // Can be Token_Eq or Token_EqualBool
+        next_byte = StringStream_Peek(s);
+        if (next_byte == '=') {
+            *out = Token_EqualBool;
+            // just ignore the eof error here, will be dealt with on the next peek call.
+            StringStream_Advance(s);
+            (*valid_chars)++;
+            return true;
+        } else {
+            *out = Token_Eq;
+            return true;
+        }
     case '/':
         *out = Token_Division;
         return true;
@@ -84,9 +98,51 @@ static bool Token_GetSingleByteToken(byte b, TokenType *out) {
     case '}':
         *out = Token_CloseBracket;
         return true;
+    case '>':
+        // Can be Token_GreaterThan or Token_GreaterOrEqual
+        next_byte = StringStream_Peek(s);
+        if (next_byte == '=') {
+            *out = Token_GreaterOrEqual;
+            // just ignore the eof error here, will be dealt with on the next peek call.
+            StringStream_Advance(s);
+            (*valid_chars)++;
+            return true;
+        } else {
+            *out = Token_GreaterThan;
+            return true;
+        }
+    case '<':
+        // Can be Token_LessThan or Token_LessOrEqual
+        next_byte = StringStream_Peek(s);
+        if (next_byte == '=') {
+            *out = Token_LessOrEqual;
+            // just ignore the eof error here, will be dealt with on the next peek call.
+            StringStream_Advance(s);
+            (*valid_chars)++;
+            return true;
+        } else {
+            *out = Token_LessThan;
+            return true;
+        }
+    case '!':
+        // Can only be Token_NotEqual
+        next_byte = StringStream_Peek(s);
+        if (next_byte == '=') {
+            *out = Token_NotEqual;
+            // just ignore the eof error here, will be dealt with on the next peek call.
+            StringStream_Advance(s);
+            (*valid_chars)++;
+            return true;
+        } else {
+            goto error;
+        }
     default:
-        return false;
+        goto error;
     }
+
+error:
+    *valid_chars = valid_chars_original;
+    return false;
 }
 
 // Error_UnknownToken
@@ -128,9 +184,7 @@ start:
         goto start;
     } else {
         // deal with single character tokens.
-        if (Token_GetSingleByteToken(b, &out->token_type)) {
-            valid_chars++;
-        } else {
+        if (!Token_ParseOperators(&copy, &valid_chars, b, &out->token_type)) {
             return Error_UnknownToken;
         }
     }
@@ -144,6 +198,10 @@ start:
             out->token_type = Token_If;
         else if (String_IsStaticEqual(&out->token_data, "else"))
             out->token_type = Token_Else;
+        else if (String_IsStaticEqual(&out->token_data, "and"))
+            out->token_type = Token_And;
+        else if (String_IsStaticEqual(&out->token_data, "or"))
+            out->token_type = Token_Or;
     }
 
     // update the stream.

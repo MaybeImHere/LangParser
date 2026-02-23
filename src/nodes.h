@@ -39,6 +39,9 @@ typedef enum NodeType {
     Node_Value,
     Node_ExprAtom,
     Node_Expr,
+    Node_SetVariable,
+    Node_IfStmt,
+    Node_Stmt,
     Node_Program,
 } NodeType;
 
@@ -81,8 +84,27 @@ typedef enum ExprOp {
     ExprOp_Div,
     ExprOp_Negate,
     ExprOp_LoneAtom,
+
+    ExprOp_GreaterThan,    // a > b
+    ExprOp_LessThan,       // a < b
+    ExprOp_GreaterOrEqual, // a >= b
+    ExprOp_LessOrEqual,    // a <= b
+    ExprOp_IsEqual,        // a == b
+    ExprOp_IsNotEqual,     // a != b
+
+    ExprOp_And,
+    ExprOp_Or,
+
     ExprOp_Invalid,
 } ExprOp;
+
+typedef enum ExprOpPrecedence {
+    ExprOpPrec_BoolBinaryOps,
+    ExprOpPrec_BoolComparisons,
+    ExprOpPrec_AddSub,
+    ExprOpPrec_MulDiv,
+    ExprOpPrec_Negation,
+} ExprOpPrecedence;
 
 typedef struct Expr {
     ExprOp op_type;
@@ -99,6 +121,32 @@ typedef struct Expr {
     };
 } Expr;
 
+// a = 1 + 2
+typedef struct SetVariable {
+    String variable_name;
+    Child variable_value_expr;
+} SetVariable;
+
+typedef struct IfStmt {
+    Child condition;
+    Child first_stmt;
+} IfStmt;
+
+typedef enum StmtType {
+    Stmt_Assign,
+    Stmt_Invalid,
+} StmtType;
+
+typedef struct Stmt {
+    StmtType type;
+    union {
+        Child set_variable;
+    };
+
+    bool has_next_stmt;
+    Child next_stmt;
+} Stmt;
+
 typedef struct Program {
     Child variable_decl;
 } Program;
@@ -112,6 +160,9 @@ typedef struct Node {
         ValueNode value;
         ExprAtom expr_atom;
         Expr expr;
+        SetVariable set_variable;
+        IfStmt if_stmt;
+        Stmt stmt;
         Program program_node;
     };
 } Node;
