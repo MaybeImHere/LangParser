@@ -134,6 +134,7 @@ typedef struct IfStmt {
 
 typedef enum StmtType {
     Stmt_Assign,
+    Stmt_If,
     Stmt_Invalid,
 } StmtType;
 
@@ -141,6 +142,7 @@ typedef struct Stmt {
     StmtType type;
     union {
         Child set_variable;
+        Child if_stmt;
     };
 
     bool has_next_stmt;

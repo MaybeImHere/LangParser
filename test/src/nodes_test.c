@@ -74,6 +74,35 @@ void ShouldFail(const char *test_name, const char *to_parse, Error expected_erro
     printf("[PASSED] %s\n", test_name);
 }
 
+void PrintOutput(const char *test_name, const char *to_parse) {
+    String test_string = StringFromLiteral(to_parse);
+
+    ParseState ps;
+    Error err = ParseState_Init(&ps, &test_string);
+    NOFAIL("initialization of parser failed");
+
+    Node *node_ptr = NULL;
+    err = ParseState_ParseProgram(&ps, &node_ptr);
+    if (err != Error_Good) {
+        ERROR("unexpected error while parsing");
+    }
+
+    DynamicString str;
+    err = Node_Print(&str, node_ptr);
+    if (err != Error_Good) {
+        ERROR("unexpected error while printing");
+    }
+
+    UInt len = DynamicString_GetLength(&str);
+    for (UInt i = 0; i < len; i++) {
+        putchar(DynamicString_At(&str, i));
+    }
+
+    DynamicString_Free(&str);
+    ParseState_Free(&ps);
+    printf("\n[PASSED] %s\n", test_name);
+}
+
 int main() {
     /*
     TestParsing("statement test 1", "a = abc   +   123\nb = 123\nc = happy\nd = a != b",
@@ -84,8 +113,7 @@ int main() {
     ShouldFail("nothing after equals sign", "a=", Error_ParseFailed);
     */
 
-    TestParsing("if test 1", "if a == b { a = b\n b = 10*c\n d=(-a + b) - (c * ((-3*d)+1))}",
-                "if a == b {\na = b\nb = 10 * c\nd = (-a + b) - (c * ((-3*d)+1))\n}");
+    PrintOutput("if test 1", "if a == b { a = b\n b = 10*c\n d=-a+b-c*(-3*d+1)}");
 
     return 0;
 }

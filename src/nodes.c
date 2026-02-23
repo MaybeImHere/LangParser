@@ -300,131 +300,15 @@ static bool PSS_ParseExprAtom(ParseStateSave *p, Child *node_idx_out) {
     PARSE_RET_GOOD;
 }
 
-// this tries parsing binary operators that an expression would expect, like + - * /
-// also define this macro just for this function.
-#define SET_OP_TYPE_AND_RETURN(_op_type)                                                           \
-    {                                                                                              \
-        *op_type = _op_type;                                                                       \
-        PARSE_RET_GOOD;                                                                            \
-    }
-
-// Parsing negations
-static bool PSS_ParseExpr1(ParseStateSave *p, Child *node_idx_out, ExprOpPrecedence precedence) {
+// Parsing negations or lone atoms.
+// Will either return a negation Expr, or an ExprAtom
+static bool PSS_ParseUnaryExpr(ParseStateSave *p, Child *node_idx_out) {
     PARSE_INIT;
 
     Expr expr = {.op_type = ExprOp_Invalid};
 
-    if (precedence == ExprOpPrec_Negation) {
-        // see if it's a negation expression.
-        if (PSS_ParseToken(&save, Token_Minus, NULL)) {
-            // set the type of operation.
-            expr.op_type = ExprOp_Negate;
-            // now parse the expression atom that is being negated.
-            MUST_PARSE(PSS_ParseExprAtom(&save, &expr.one_arg_op.atom));
-
-            Node expr_node = {.node_type = Node_Expr, .expr = expr};
-            MUST_PARSE(PSS_CreateNode(&save, &expr_node, node_idx_out));
-
-            PARSE_RET_GOOD;
-        } else {
-            CHECK_RECOVERY;
-            // not negation, so must be a lone atom.
-        }
-    } else if (precedence == ExprOpPrec_MulDiv) {
-        if (!PSS_ParseExpr1(&save, expr.two_arg_op))
-    }
-
-    PARSE_RET_ERROR;
-}
-
-static bool PSS_ParseExpr2Atom(ParseStateSave *p, Child *node_idx_out) {
-    PARSE_INIT;
-
-    if (PSS_ParseExpr1(&save, node_idx_out))
-        PARSE_RET_GOOD;
-    CHECK_RECOVERY;
-
-    if (PSS_ParseExprAtom(&save, node_idx_out))
-        PARSE_RET_GOOD;
-
-    PARSE_RET_ERROR;
-}
-
-// Parsing multiplication and division.
-static bool PSS_ParseExpr2(ParseStateSave *p, Child *node_idx_out) {
-    PARSE_INIT;
-
-    Expr expr = {.op_type = ExprOp_Invalid};
-
-    if (PSS_ParseExpr1(&save, &expr.two_arg_op.lhs)) {
-        if (PSS_ParseExpr1(&save, &expr.two_arg_op.rhs)) {
-        }
-    }
-
-    PARSE_RET_ERROR;
-}
-
-// This function tries to figure out which expression op type is the current expression, assuming
-// the first expression atom has already been parsed. Basically, is it a plus, minus, times, etc.
-// Will pretty much always return true unless there is an allocation error/unknown token error.
-static bool PSS_ParseExprBinaryOperator(ParseStateSave *p, ExprOp *op_type) {
-    PARSE_INIT;
-
-    // first try parsing the operators. if they parse successfully, they will set the expression
-    // op_type and return true.
-    if (PSS_ParseToken(&save, Token_Plus, NULL))
-        SET_OP_TYPE_AND_RETURN(ExprOp_Add);
-    CHECK_RECOVERY;
-
-    if (PSS_ParseToken(&save, Token_Minus, NULL))
-        SET_OP_TYPE_AND_RETURN(ExprOp_Sub);
-    CHECK_RECOVERY;
-
-    if (PSS_ParseToken(&save, Token_Asterisk, NULL))
-        SET_OP_TYPE_AND_RETURN(ExprOp_Mul);
-    CHECK_RECOVERY;
-
-    if (PSS_ParseToken(&save, Token_Division, NULL))
-        SET_OP_TYPE_AND_RETURN(ExprOp_Div);
-    CHECK_RECOVERY;
-
-    if (PSS_ParseToken(&save, Token_GreaterThan, NULL))
-        SET_OP_TYPE_AND_RETURN(ExprOp_GreaterThan);
-    CHECK_RECOVERY;
-
-    if (PSS_ParseToken(&save, Token_LessThan, NULL))
-        SET_OP_TYPE_AND_RETURN(ExprOp_LessThan);
-    CHECK_RECOVERY;
-
-    if (PSS_ParseToken(&save, Token_GreaterOrEqual, NULL))
-        SET_OP_TYPE_AND_RETURN(ExprOp_GreaterOrEqual);
-    CHECK_RECOVERY;
-
-    if (PSS_ParseToken(&save, Token_LessOrEqual, NULL))
-        SET_OP_TYPE_AND_RETURN(ExprOp_LessOrEqual);
-    CHECK_RECOVERY;
-
-    if (PSS_ParseToken(&save, Token_EqualBool, NULL))
-        SET_OP_TYPE_AND_RETURN(ExprOp_IsEqual);
-    CHECK_RECOVERY;
-
-    if (PSS_ParseToken(&save, Token_NotEqual, NULL))
-        SET_OP_TYPE_AND_RETURN(ExprOp_IsNotEqual);
-    CHECK_RECOVERY;
-
-    // None of these suceeded, but we can still recover, so it's a lone value.
-    SET_OP_TYPE_AND_RETURN(ExprOp_LoneAtom);
-}
-#undef SET_OP_TYPE_AND_RETURN
-
-static bool PSS_ParseNegationExpr(ParseStateSave *p, Child *node_idx_out) {
-    PARSE_INIT;
-
-    Expr expr = {.op_type = ExprOp_Invalid};
-
-    // first see if it's a negation expression.
     if (PSS_ParseToken(&save, Token_Minus, NULL)) {
-        // first set the type of operation.
+        // set the type of operation.
         expr.op_type = ExprOp_Negate;
         // now parse the expression atom that is being negated.
         MUST_PARSE(PSS_ParseExprAtom(&save, &expr.one_arg_op.atom));
@@ -433,67 +317,231 @@ static bool PSS_ParseNegationExpr(ParseStateSave *p, Child *node_idx_out) {
         MUST_PARSE(PSS_CreateNode(&save, &expr_node, node_idx_out));
 
         PARSE_RET_GOOD;
+    } else {
+        CHECK_RECOVERY;
+        // not negation, so must be a lone atom.
+        MUST_PARSE(PSS_ParseExprAtom(&save, node_idx_out));
+        PARSE_RET_GOOD;
     }
-    PARSE_RET_ERROR;
 }
 
+// Parsing multiplications and divisions
+// Will return a ExprOp_Mul/ExprOp_Div if there is a multiplication/division, otherwise bubbles up
+// return from PSS_ParseUnaryExpr.
 static bool PSS_ParseMulDivExpr(ParseStateSave *p, Child *node_idx_out) {
     PARSE_INIT;
 
-    Expr expr = {.op_type = ExprOp_Invalid};
+    Child first_node;
+    Child maybe_second_node;
+    ExprOp op_type = ExprOp_Invalid;
 
-    MUST_PARSE(PSS_ParseExprAtom(&save, &expr.two_arg_op.lhs));
+    // we absolutely need the first node.
+    MUST_PARSE(PSS_ParseUnaryExpr(&save, &first_node));
 
-    if (PSS_ParseToken(&save, Token_Asterisk, NULL)) {
+    while (true) {
+        // found the first argument. check if there is a multiplication/division symbol.
+        if (PSS_ParseToken(&save, Token_Asterisk, NULL)) {
+            // multiplication expression. there can't be a hanging asterisk, so there must be
+            // another.
+            MUST_PARSE(PSS_ParseUnaryExpr(&save, &maybe_second_node));
+            op_type = ExprOp_Mul;
+            goto done_parsing;
+        } else {
+            CHECK_RECOVERY;
+        }
 
-    } else {
-        CHECK_RECOVERY;
+        // try parsing division expression instead.
+        if (PSS_ParseToken(&save, Token_Division, NULL)) {
+            MUST_PARSE(PSS_ParseUnaryExpr(&save, &maybe_second_node));
+            op_type = ExprOp_Div;
+            goto done_parsing;
+        } else {
+            CHECK_RECOVERY;
+        }
+
+        // wasn't multiplication or division, so just bubble up the first node.
+        // If there wasn't any binary operations (it was just a lone atom/negation), then first_node
+        // will just contain that atom. If there was a binary operation, first_node will contain the
+        // most recently created binary operation node.
+        *node_idx_out = first_node;
+        PARSE_RET_GOOD;
+    done_parsing:;
+        // since we found an operator, we have to create a new binary operator node. also, we want
+        // to make sure to make this new binary node the next lhs, so that the next iteration of the
+        // loop, we can check for chained binary operations, such as the expression a * b * c / d /
+        // e * f
+
+        // First create the expression struct, with the lhs being the previously parsed node or the
+        // first ExprAtom. We don't have to worry about single atom expressions, as that was handled
+        // in the area after the if blocks.
+        Expr expr = {
+            .op_type = op_type,
+            .two_arg_op =
+                {
+                    .lhs = first_node,
+                    .rhs = maybe_second_node,
+                },
+        };
+
+        // Now allocate the node and push it to the stack.
+        Node node = {.node_type = Node_Expr, .expr = expr};
+        MUST_PARSE(PSS_CreateNode(&save, &node, &first_node));
+    }
+}
+
+// Parsing additions and subtractions
+// Only returns Add/Sub nodes if there is an plus/minus symbol.
+static bool PSS_ParseAddSubExpr(ParseStateSave *p, Child *node_idx_out) {
+    PARSE_INIT;
+
+    Child first_node;
+    Child maybe_second_node;
+    ExprOp op_type = ExprOp_Invalid;
+
+    // we absolutely need the first node.
+    MUST_PARSE(PSS_ParseMulDivExpr(&save, &first_node));
+
+    while (true) {
+        // found the first argument. check if there is a add/sub symbol.
+        if (PSS_ParseToken(&save, Token_Plus, NULL)) {
+            // add expression. there can't be a hanging plus, so there must be
+            // another mul/div/atom expression.
+            MUST_PARSE(PSS_ParseMulDivExpr(&save, &maybe_second_node));
+            op_type = ExprOp_Add;
+            goto done_parsing;
+        } else {
+            CHECK_RECOVERY;
+        }
+
+        // try parsing subtraction expression instead.
+        if (PSS_ParseToken(&save, Token_Minus, NULL)) {
+            MUST_PARSE(PSS_ParseMulDivExpr(&save, &maybe_second_node));
+            op_type = ExprOp_Sub;
+            goto done_parsing;
+        } else {
+            CHECK_RECOVERY;
+        }
+
+        // wasn't addition or subtraction, so just bubble up the first node.
+        // If there wasn't any binary operations (it was just a lone atom/negation), then first_node
+        // will just contain that atom. If there was a binary operation, first_node will contain the
+        // most recently created binary operation node.
+        *node_idx_out = first_node;
+        PARSE_RET_GOOD;
+    done_parsing:;
+        // For details, see the MulDiv variant of this function.
+        Expr expr = {
+            .op_type = op_type,
+            .two_arg_op =
+                {
+                    .lhs = first_node,
+                    .rhs = maybe_second_node,
+                },
+        };
+
+        // Now allocate the node and push it to the stack.
+        Node node = {.node_type = Node_Expr, .expr = expr};
+        MUST_PARSE(PSS_CreateNode(&save, &node, &first_node));
+    }
+}
+
+// Helper macro for parsing continuations of binary operators.
+#define IF_TOKEN_THEN_OP(token_type, new_op_type, lower_parse_func)                                \
+    if (PSS_ParseToken(&save, token_type, NULL)) {                                                 \
+        MUST_PARSE(lower_parse_func(&save, &maybe_second_node));                                   \
+        op_type = new_op_type;                                                                     \
+        goto done_parsing;                                                                         \
+    } else {                                                                                       \
+        CHECK_RECOVERY;                                                                            \
     }
 
-    PARSE_RET_GOOD;
+// parse expressions containing comparison operators like ==, !=, <, >, <=, >=
+static bool PSS_ParseComparisonExpr(ParseStateSave *p, Child *node_idx_out) {
+    PARSE_INIT;
+
+    Child first_node;
+    Child maybe_second_node;
+    ExprOp op_type = ExprOp_Invalid;
+
+    // we absolutely need the first node.
+    MUST_PARSE(PSS_ParseAddSubExpr(&save, &first_node));
+
+    while (true) {
+        IF_TOKEN_THEN_OP(Token_GreaterThan, ExprOp_GreaterThan, PSS_ParseAddSubExpr);
+        IF_TOKEN_THEN_OP(Token_LessThan, ExprOp_LessThan, PSS_ParseAddSubExpr);
+        IF_TOKEN_THEN_OP(Token_GreaterOrEqual, ExprOp_GreaterOrEqual, PSS_ParseAddSubExpr);
+        IF_TOKEN_THEN_OP(Token_LessOrEqual, ExprOp_LessOrEqual, PSS_ParseAddSubExpr);
+        IF_TOKEN_THEN_OP(Token_EqualBool, ExprOp_IsEqual, PSS_ParseAddSubExpr);
+        IF_TOKEN_THEN_OP(Token_NotEqual, ExprOp_IsNotEqual, PSS_ParseAddSubExpr);
+
+        // wasn't addition or subtraction, so just bubble up the first node.
+        // If there wasn't any binary operations (it was just a lone atom/negation), then first_node
+        // will just contain that atom. If there was a binary operation, first_node will contain the
+        // most recently created binary operation node.
+        *node_idx_out = first_node;
+        PARSE_RET_GOOD;
+    done_parsing:;
+        // For details, see the MulDiv variant of this function.
+        Expr expr = {
+            .op_type = op_type,
+            .two_arg_op =
+                {
+                    .lhs = first_node,
+                    .rhs = maybe_second_node,
+                },
+        };
+
+        // Now allocate the node and push it to the stack.
+        Node node = {.node_type = Node_Expr, .expr = expr};
+        MUST_PARSE(PSS_CreateNode(&save, &node, &first_node));
+    }
 }
+
+// parse expressions containing and/or
+static bool PSS_ParseAndOrExpr(ParseStateSave *p, Child *node_idx_out) {
+    PARSE_INIT;
+
+    Child first_node;
+    Child maybe_second_node;
+    ExprOp op_type = ExprOp_Invalid;
+
+    // we absolutely need the first node.
+    MUST_PARSE(PSS_ParseComparisonExpr(&save, &first_node));
+
+    while (true) {
+        IF_TOKEN_THEN_OP(Token_And, ExprOp_And, PSS_ParseComparisonExpr);
+        IF_TOKEN_THEN_OP(Token_Or, ExprOp_Or, PSS_ParseComparisonExpr);
+
+        // wasn't addition or subtraction, so just bubble up the first node.
+        // If there wasn't any binary operations (it was just a lone atom/negation), then first_node
+        // will just contain that atom. If there was a binary operation, first_node will contain the
+        // most recently created binary operation node.
+        *node_idx_out = first_node;
+        PARSE_RET_GOOD;
+    done_parsing:;
+        // For details, see the MulDiv variant of this function.
+        Expr expr = {
+            .op_type = op_type,
+            .two_arg_op =
+                {
+                    .lhs = first_node,
+                    .rhs = maybe_second_node,
+                },
+        };
+
+        // Now allocate the node and push it to the stack.
+        Node node = {.node_type = Node_Expr, .expr = expr};
+        MUST_PARSE(PSS_CreateNode(&save, &node, &first_node));
+    }
+}
+
+#undef IF_TOKEN_THEN_OP
 
 static bool PSS_ParseExpr(ParseStateSave *p, Child *node_idx_out) {
     PARSE_INIT;
 
-    Expr expr = {.op_type = ExprOp_Invalid};
-
-    // first see if it's a negation expression.
-    if (PSS_ParseToken(&save, Token_Minus, NULL)) {
-        // first set the type of operation.
-        expr.op_type = ExprOp_Negate;
-        // now parse the expression atom that is being negated.
-        MUST_PARSE(PSS_ParseExprAtom(&save, &expr.one_arg_op.atom));
-
-        Node expr_node = {.node_type = Node_Expr, .expr = expr};
-        MUST_PARSE(PSS_CreateNode(&save, &expr_node, node_idx_out));
-
-    } else {
-        CHECK_RECOVERY;
-
-        // it wasn't, so parse the first atom.
-        Child first_atom;
-        MUST_PARSE(PSS_ParseExprAtom(&save, &first_atom));
-
-        // now check to see which operator it is.
-        ExprOp op_type;
-        MUST_PARSE(PSS_ParseExprBinaryOperator(&save, &op_type));
-        expr.op_type = op_type;
-
-        // check to see whether it's a binary op, or a unary op. set the children accordingly.
-        if (op_type != ExprOp_LoneAtom) {
-            // binary op, so we have to parse a second atom.
-            expr.two_arg_op.lhs = first_atom;
-            MUST_PARSE(PSS_ParseExprAtom(&save, &expr.two_arg_op.rhs));
-        } else {
-            // single op, so just the atom we already parsed.
-            expr.one_arg_op.atom = first_atom;
-        }
-    }
-
-    Node expr_node = {.node_type = Node_Expr, .expr = expr};
-
-    MUST_PARSE(PSS_CreateNode(&save, &expr_node, node_idx_out));
+    // just a wrapper for this for now.
+    MUST_PARSE(PSS_ParseAndOrExpr(&save, node_idx_out));
 
     PARSE_RET_GOOD;
 }
@@ -537,6 +585,15 @@ static bool PSS_ParseOneStmt(ParseStateSave *p, Child *node_idx_out) {
     if (PSS_ParseSetVariable(&save, &stmt.set_variable)) {
         stmt.type = Stmt_Assign;
         goto create_node;
+    } else {
+        CHECK_RECOVERY;
+    }
+
+    if (PSS_ParseIfStmt(&save, &stmt.if_stmt)) {
+        stmt.type = Stmt_If;
+        goto create_node;
+    } else {
+        CHECK_RECOVERY;
     }
 
     PARSE_RET_ERROR;
@@ -546,6 +603,8 @@ create_node:;
     PARSE_RET_GOOD;
 }
 
+// this doesn't handle any of the logic of parsing an individual statement. it just handles parsing
+// a sequence of statements. actual parsing logic is implemented in PSS_ParseOneStmt
 static bool PSS_ParseStmt(ParseStateSave *p, Child *node_idx_out) {
     PARSE_INIT;
 
@@ -582,12 +641,14 @@ static bool PSS_ParseStmt(ParseStateSave *p, Child *node_idx_out) {
     PARSE_RET_ERROR;
 }
 
+// This is the actual entry point for parsing. This function, or one of it's callees, should be
+// modified if changing the program parse tree structure.
 static Error PSS_ParseProgram(ParseStateSave *p, Child *node_idx_out) {
     PARSE_INIT;
 
     // parse the node data
     Child idx;
-    if (!PSS_ParseIfStmt(&save, &idx))
+    if (!PSS_ParseStmt(&save, &idx))
         PARSE_RET_ERROR;
 
     // create the node
@@ -608,7 +669,8 @@ static bool Expr_IsOneArgOp(ExprOp op) { return op == ExprOp_Negate || op == Exp
 static bool Expr_IsTwoArgOp(ExprOp op) {
     return op == ExprOp_Add || op == ExprOp_Sub || op == ExprOp_Mul || op == ExprOp_Div ||
            op == ExprOp_GreaterThan || op == ExprOp_LessThan || op == ExprOp_GreaterOrEqual ||
-           op == ExprOp_LessOrEqual || op == ExprOp_IsEqual || op == ExprOp_IsNotEqual;
+           op == ExprOp_LessOrEqual || op == ExprOp_IsEqual || op == ExprOp_IsNotEqual ||
+           op == ExprOp_And || op == ExprOp_Or;
 }
 
 // Converts node indices witin all nodes into pointers. Returns Error_Internal if an unrecognized
@@ -653,6 +715,8 @@ static Error ParseState_ConvertIndicesToPtrs(ParseState *p) {
             // first convert this statement's children.
             if (node_ptr->stmt.type == Stmt_Assign) {
                 ParseState_ConvertChild(p, &node_ptr->stmt.set_variable);
+            } else if (node_ptr->stmt.type == Stmt_If) {
+                ParseState_ConvertChild(p, &node_ptr->stmt.if_stmt);
             } else {
                 return Error_Internal;
             }
@@ -670,6 +734,7 @@ static Error ParseState_ConvertIndicesToPtrs(ParseState *p) {
     return Error_Good;
 }
 
+// This is just a wrapper around PSS_ParseProgram. Modify that function instead.
 Error ParseState_ParseProgram(ParseState *p, Node **node_ptr_out) {
     ParseStateSave save = ParseState_InitSave(p);
 
@@ -809,6 +874,14 @@ static Error Child_Print(DynamicString *out, Child child_node) {
             PRINT_NODE(node->expr.two_arg_op.lhs);
             PRINT_CONST_STR(" != ");
             PRINT_NODE(node->expr.two_arg_op.rhs);
+        } else if (node->expr.op_type == ExprOp_And) {
+            PRINT_NODE(node->expr.two_arg_op.lhs);
+            PRINT_CONST_STR(" && ");
+            PRINT_NODE(node->expr.two_arg_op.rhs);
+        } else if (node->expr.op_type == ExprOp_Or) {
+            PRINT_NODE(node->expr.two_arg_op.lhs);
+            PRINT_CONST_STR(" || ");
+            PRINT_NODE(node->expr.two_arg_op.rhs);
         } else {
             return Error_Internal;
         }
@@ -819,6 +892,7 @@ static Error Child_Print(DynamicString *out, Child child_node) {
         PRINT_CONST_STR(" = ");
         PRINT_NODE(node->set_variable.variable_value_expr);
         break;
+
     case Node_IfStmt:
         PRINT_CONST_STR("if ");
         PRINT_NODE(node->if_stmt.condition);
@@ -830,6 +904,8 @@ static Error Child_Print(DynamicString *out, Child child_node) {
     case Node_Stmt:
         if (node->stmt.type == Stmt_Assign) {
             PRINT_NODE(node->stmt.set_variable);
+        } else if (node->stmt.type == Stmt_If) {
+            PRINT_NODE(node->stmt.if_stmt);
         } else {
             return Error_Internal;
         }

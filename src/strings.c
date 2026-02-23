@@ -97,13 +97,23 @@ bool String_IsEqual(const String *s1, const String *s2) {
 }
 
 bool String_IsStaticEqual(const String *s1, const char *s2) {
-    for (UInt i = 0; i < s1->length; i++) {
-        if (s2[i] == '\0')
+    // now scan to see if all of the bytes up to the end of either string are equal
+    UInt i = 0;
+    while (true) {
+        if (i >= s1->length) {
+            // reached the end of s1, so see if we also reached the end of s2
+            return s2[i] == '\0';
+        } else if (s2[i] == '\0') {
+            // reached the end of s2, but not the end of s1, so the strings aren't equal.
             return false;
-        if ((byte)s2[i] != s1->data[i])
-            return false;
+        } else {
+            // still in the middle of both strings, so do a simple byte comparison.
+            if (s1->data[i] != s2[i]) {
+                return false;
+            }
+        }
+        i++;
     }
-    return true;
 }
 
 void StringStream_Init(StringStream *s, const String *src) {
