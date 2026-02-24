@@ -3,11 +3,22 @@
 #include "err.h"
 #include "strings.h"
 
+typedef UInt ArrayIndex;
+
+#define ARRAYINDEX_INVALID UIntMax
+
 typedef struct DynamicString {
     byte *src;
     UInt length;
     UInt capacity;
 } DynamicString;
+
+// A string that uses indices instead of pointers to reference a part of the array.
+typedef struct DynStrRef {
+    const DynamicString *dyn_str;
+    ArrayIndex start_index;
+    UInt length;
+} DynStrRef;
 
 // Initializes the heap allocated string.
 // Error_Alloc
@@ -27,6 +38,9 @@ UInt DynamicString_GetLength(const DynamicString *in);
 // Returns the byte at the specified index. if out of bounds, returns 0.
 byte DynamicString_At(const DynamicString *in, UInt index);
 
+// Returns a zero length string reference to the given position within the DynamicString.
+DynStrRef DynamicString_GetRefToIndex(const DynamicString *in, ArrayIndex index);
+
 // Appends a space_count number of spaces to the string.
 // Error_Alloc
 Error DynamicString_StartLine(DynamicString *in, UInt space_count);
@@ -40,10 +54,6 @@ Error DynamicString_EndLine(DynamicString *in);
 Error DynamicString_AppendConstStrLine(DynamicString *out, const char *s, UInt space_count);
 
 void DynamicString_Free(DynamicString *in);
-
-typedef UInt ArrayIndex;
-
-#define ARRAYINDEX_INVALID UIntMax
 
 typedef struct DynamicArray {
     byte *src;

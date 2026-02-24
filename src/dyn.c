@@ -110,6 +110,11 @@ byte DynamicString_At(const DynamicString *in, UInt index) {
     return in->src[index];
 }
 
+DynStrRef DynamicString_GetRefToIndex(const DynamicString *in, ArrayIndex index) {
+    DynStrRef ret = {.dyn_str = in, .start_index = index, .length = 0};
+    return ret;
+}
+
 Error DynamicString_StartLine(DynamicString *in, UInt space_count) {
     Error err = DynamicString_AppendByteRepeatedly(in, ' ', space_count);
     BUBBLE(Error_Alloc);

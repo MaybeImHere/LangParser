@@ -8,7 +8,7 @@
 
 typedef struct Instruction {
     // the code for this instruction, represented as a C assignment expression.
-    String c_instruction;
+    DynStrRef c_instruction;
 } Instruction;
 
 typedef enum StateTransitionType {
@@ -19,7 +19,12 @@ typedef enum StateTransitionType {
 typedef struct State {
     UInt state_id;
     // a slice from the string_arena.
-    String instructions;
+    ArrayIndex instr_start_idx;
+    ArrayIndex instr_end_idx;
+
+    // when appending an instruction, we also have to append a comma. we don't want to do this for
+    // the first instruction.
+    bool has_first_instruction;
 
     StateTransitionType trans_type;
     union {
@@ -37,11 +42,12 @@ typedef struct StateMachine {
     // Holds type State
     DynamicArray states;
 
+    // all operations on the State graph will occur in this state.
+    // note that pushing to states will invalidate this pointer.
+    State *state_cursor;
+
     // holds strings for all of the states.
     DynamicString string_arena;
-
-    // holds all of the instructions, is an array holding String.
-    DynamicArray instructions;
 
     // a map from String -> void
     // so really just a set. need this so we know what variables to declare at the start of
@@ -54,6 +60,14 @@ typedef struct StateMachine {
 
 // Initializes the state machine. May return Error_Alloc
 Error StateMachine_Init(StateMachine *sm);
+
+// Appends an assignment instruction to the current state with the given variable name and
+// expression.
+Error StateMachine_AppendAssignment(StateMachine *sm, const String *variable_name,
+                                    const String *expression);
+
+// Converts the state machine to a c program.
+Error StateMachine_ToCProgram(const StateMachine *sm, DynamicString *out);
 
 // Frees the state machine and any associated data.
 void StateMachine_Free(StateMachine *sm);
