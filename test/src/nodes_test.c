@@ -74,8 +74,17 @@ void ShouldFail(const char *test_name, const char *to_parse, Error expected_erro
     printf("[PASSED] %s\n", test_name);
 }
 
-void PrintOutput(const char *test_name, const char *to_parse) {
-    String test_string = String_FromLiteral(to_parse);
+void PrintOutput(const char *test_name, const char *to_parse, bool use_file) {
+    String test_string;
+    byte *test_string_data = NULL;
+    if (use_file) {
+        Error err = String_FromFile(&test_string, &test_string_data, to_parse);
+        if (err != Error_Good) {
+            ERROR("while reading file.");
+        }
+    } else {
+        test_string = String_FromLiteral(to_parse);
+    }
 
     ParseState ps;
     Error err = ParseState_Init(&ps, &test_string);
@@ -98,6 +107,7 @@ void PrintOutput(const char *test_name, const char *to_parse) {
         putchar(DynamicString_At(&str, i));
     }
 
+    free(test_string_data);
     DynamicString_Free(&str);
     ParseState_Free(&ps);
     printf("\n[PASSED] %s\n", test_name);
@@ -113,7 +123,7 @@ int main() {
     ShouldFail("nothing after equals sign", "a=", Error_ParseFailed);
     */
 
-    PrintOutput("if test 1", "if a == b { a = b\n b = 10*c\n d=-a+b-c*(-3*d+1)}");
-
+    // PrintOutput("if test 1", "if a == b { a = b\n b = 10*c\n d=-a+b-c*(-3*d+1)}");
+    PrintOutput("File reading test1", "data/test.txt", true);
     return 0;
 }

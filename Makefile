@@ -15,7 +15,9 @@ COMMON_SRCS = $(SRC_DIR)/dyn.c \
 			  $(SRC_DIR)/lex.c \
  			  $(SRC_DIR)/map.c \
 			  $(SRC_DIR)/nodes.c \
-              $(SRC_DIR)/strings.c 
+              $(SRC_DIR)/strings.c \
+			  $(SRC_DIR)/state.c
+
 
 # Create object file names for common sources (e.g., build/map.o)
 COMMON_OBJS = $(COMMON_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
@@ -38,6 +40,10 @@ tests: $(TEST_BINS)
 
 test_nodes: $(TEST_BUILD_DIR)/nodes_test
 	@valgrind --quiet --error-exitcode=1 --leak-check=full --show-leak-kinds=all --track-origins=yes $(TEST_BUILD_DIR)/nodes_test || exit 1;
+	@echo "Test passed."
+
+test_state: $(TEST_BUILD_DIR)/state_test
+	@valgrind --quiet --error-exitcode=1 --leak-check=full --show-leak-kinds=all --track-origins=yes $(TEST_BUILD_DIR)/state_test || exit 1;
 	@echo "Test passed."
 
 # Rule to build the main application

@@ -617,24 +617,27 @@ static bool PSS_ParseStmt(ParseStateSave *p, Child *node_idx_out) {
     *node_idx_out = first_stmt;
 
     // now keep parsing statements until we reach an error.
-    Node *cur_node = NULL;
     Child new_stmt = first_stmt;
     while (true) {
-        // get a pointer to the previous node.
-        cur_node = ParseState_GetNodePtr(save.p, new_stmt);
-
         // try and parse a new statement node.
+        // we have to call ParseState_GetNodePtr from within the if blocks because the pointer to
+        // the node may be invalidated after a call to PSS_ParseOneStmt
         if (!PSS_ParseOneStmt(&save, &new_stmt)) {
             CHECK_RECOVERY;
 
             // it failed, so we are done.
+            Node *cur_node = ParseState_GetNodePtr(save.p, first_stmt);
             cur_node->stmt.has_next_stmt = false;
             PARSE_RET_GOOD;
 
         } else {
             // it didn't fail, so we have to continue.
+            Node *cur_node = ParseState_GetNodePtr(save.p, first_stmt);
             cur_node->stmt.has_next_stmt = true;
             cur_node->stmt.next_stmt = new_stmt;
+
+            // make sure to set the previous stmt index to the node we just created.
+            first_stmt = new_stmt;
         }
     }
 
